@@ -16,7 +16,7 @@ use pose::{HeadPose, ReferenceShape};
 /// Everything the pointer logic needs to know about the face in one frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceMeasurement {
-    /// Seconds, on the camera's clock.
+    /// Seconds, on the clock of the frame it was measured in.
     pub time: f64,
     pub pose: HeadPose,
     pub eyes: EyeSignals,

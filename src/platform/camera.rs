@@ -3,11 +3,11 @@
 //! Contract: `Camera::open` picks the native format closest to the request and
 //! asks the OS to convert it to RGB32, so callers always receive top-down BGRA
 //! frames regardless of what the device produces (MJPG, YUY2, NV12...).
-//! `read` blocks until the next frame. Any error means the device is gone or
-//! busy; the caller owns the retry policy.
+//! `read` blocks until the next frame and stamps it with the process clock, so
+//! times stay comparable when a camera is closed and opened again. Any error
+//! means the device is gone or busy; the caller owns the retry policy.
 
 use std::ffi::c_void;
-use std::time::Instant;
 
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample,
@@ -25,7 +25,7 @@ use windows::core::{GUID, Interface, PWSTR};
 
 use crate::error::{Context, Error, Result};
 use crate::image::BgraFrame;
-use crate::platform::runtime::MediaFoundation;
+use crate::platform::runtime::{self, MediaFoundation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CameraRequest {
@@ -49,7 +49,6 @@ pub struct Camera {
     stream: u32,
     width: usize,
     height: usize,
-    opened_at: Instant,
     description: String,
     // Declared last so Media Foundation outlives every MF object above.
     _media_foundation: MediaFoundation,
@@ -128,7 +127,6 @@ impl Camera {
             stream,
             width: width as usize,
             height: height as usize,
-            opened_at: Instant::now(),
             description,
             _media_foundation: media_foundation,
         })
@@ -168,7 +166,7 @@ impl Camera {
             return Ok(false);
         };
         frame.resize(self.width, self.height);
-        frame.timestamp = self.opened_at.elapsed().as_secs_f64();
+        frame.timestamp = runtime::seconds();
         unsafe { copy_sample(&sample, frame) }.context("copy a camera frame")?;
         Ok(true)
     }

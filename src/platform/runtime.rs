@@ -1,4 +1,7 @@
-//! Process- and thread-level runtime setup: COM, Media Foundation, DPI awareness.
+//! Process- and thread-level runtime setup: COM, Media Foundation, DPI awareness, the clock.
+
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
@@ -48,4 +51,12 @@ impl Drop for MediaFoundation {
 /// Must run before any window is created; a second call fails harmlessly.
 pub fn enable_per_monitor_dpi() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// Seconds on a clock shared by the whole process. It starts near zero and
+/// never goes backwards, so every time handed to the tracking and pointer
+/// logic can be compared with every other, whatever happened to the camera.
+pub fn seconds() -> f64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }

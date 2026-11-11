@@ -9,7 +9,7 @@ pub struct BgraFrame {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u8>,
-    /// Capture time on the camera's clock, in seconds.
+    /// Capture time in seconds, on a clock that never goes backwards within the process.
     pub timestamp: f64,
 }
 
