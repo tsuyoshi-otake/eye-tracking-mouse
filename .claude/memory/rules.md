@@ -1,0 +1,33 @@
+# eye-tracking-mouse rules (distilled, verified learnings)
+
+Append-only history lives in `journal.md`. Only promote a rule here after it was verified.
+
+## Checks without a person
+- [resident mode] Started without `--selftest`, `--quit`, `--list-cameras`, `--help` or `--diag`, the program takes over the real pointer and clicks. An automated run uses a camera index that does not exist and a `--data-dir` of its own, and drives the program by posting messages (`WM_HOTKEY` with the `Action` number, `WM_KEYDOWN`, `WM_CLOSE`, `WM_DISPLAYCHANGE`) to the program's own windows, never by typing keys — verified by: `tests/resident.rs` passes in under a second and its log never reaches a pointing state.
+- [left running] After any run of the program or its tests, `tasklist //FI "IMAGENAME eq eye-tracking-mouse.exe" | grep -c eye-tracking-mouse` must print `0`; an instance the test did not start is never killed — verified by: 0 before and after every resident test run, own runs and the verifier's.
+- [camera pictures] No camera picture goes into a file, a log or an agent's context: `--selftest camera`, `--selftest face` and `--diag` print numbers only. The face path is checked with `--selftest face --image file.bmp` on generated pictures, which is also how the model's conventions (eye order, down direction, depth sign) were settled — verified by: PASS on a synthetic portrait and four variants (small, tiny, rolled by 20 and 25 degrees).
+- [noise lines] Windows ML prints lines that start with a date or with `core N consist of logical processors`; filter them (`grep -vE "^core [0-9]+ consist|onnxruntime"`), they are not failures — verified by: every `--selftest model` run.
+
+## Platform
+- [SendInput] The normalised coordinate for pixel `offset` on an axis `extent` pixels long is `(offset * 65536 + 32768) / extent`, sent with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` against the virtual desktop's bounds. Windows maps `n` to `n * extent / 65536` rounded down, so only the middle of the pixel's interval lands exactly — verified by: `every_pixel_of_common_desktop_sizes_round_trips` and `--selftest pointer` (30 of 30 targets on two monitors).
+- [WinRT async] In `windows` 0.62 the blocking wait is `.join()` on the async interfaces. `DataWriter::StoreAsync` returns a class (`DataWriterStoreOperation`) instead; bytes get into an `InMemoryRandomAccessStream` with `DataWriter::WriteBytes` + `DetachBuffer` and `stream.WriteAsync(&buffer)?.join()` — verified by: `platform/inference.rs` builds and `--selftest model` matches the TFLite reference within 7.5e-4.
+- [Windows ML] The in-box `Windows.AI.MachineLearning` loads the opset 13 landmark model on Windows 11 build 26300 and runs it on the CPU in about 4.4 ms per frame; no ONNX runtime needs to be shipped — verified by: `--selftest model`.
+
+## Windows and messages
+- [window procedure] A window procedure runs no program logic: the system calls it in the middle of other calls and inside a menu's modal loop. It records an `Event`; the thread's loop takes one at a time with `window::next_event` — verified by: `a_reporting_window_notes_what_happens_in_order_and_a_reminder_only_once` and the resident test.
+- [reminders] `Paint`, `Timer` and `DisplayChanged` are recorded once while an equal event still waits: the first two repeat for as long as a menu holds the loop, the third goes to every top-level window of the thread — verified by: the same window test.
+- [single instance] The class that `FindWindowW` looks for (`MAIN_CLASS`) belongs to the main window alone; every other window of the program uses `VIEW_CLASS`, so a second start and `--quit` always find the window that answers them — verified by: the resident test (second start exits 1; `--quit` with the preview open exits 0 and the program is gone).
+
+## Control
+- [breaks] Whatever interrupts the stream of frames (a gap over 0.5 s, a pause, the start of a calibration run) resets the controller, so a click armed before the break is never delivered after it — verified by: `a_blink_that_was_armed_before_a_break_never_clicks_after_it`.
+- [blink and gaze] While the eyes are shut only the head pointer and the cursor trail are reset; the gaze history is kept, or the place looked at before the blink counts as a new rest after it and pulls the cursor back — verified by: `after_tuning_with_the_head_a_blink_does_not_throw_the_cursor_back_to_the_gaze`, which fails when the history is cleared.
+- [resting eye size] A filter that compares an eye with its resting size needs a floor on that size: a rest stage spent with the eyes shut is refused (`MIN_OPEN_SIZE`) instead of teaching the filter that shut is normal — verified by: `blinks_are_left_out_and_eyes_kept_shut_fail_the_routine`.
+- [gaze features] Head position enters the gaze model measured from the camera axis and divided by the face size, and angular features are multiplied by the distance relative to calibration — verified by: `leaning_toward_the_screen_is_compensated_by_the_face_size` and `turning_and_shifting_the_head_while_looking_at_one_place_barely_moves_the_estimate` (simulation only, not yet on a person).
+
+## Design
+- [runs have numbers] Work that is started, cancelled and replaced from another thread gets a number where it is started (`Pipeline::start_calibration`), and every message about it carries the number. The window that shows it has one rule, "closing the page always cancels its run"; nothing is inferred from the order in which messages arrive — verified by: `a_run_ends_with_one_notice_of_its_own_number_or_silently_when_cancelled_or_replaced` and the resident test.
+- [liveness] A page that waits for a worker asks for progress it can count (`Pipeline::frames()`), with a longer patience before the first frame (10 s) than between frames (3 s) — verified by: the watchdog test in `app/calibration_screen.rs`; not yet seen firing on a real camera.
+- [visibility] In `src/lib.rs`, `src/app/mod.rs` and `src/platform/mod.rs` only what `main.rs` and `tests/` use is `pub mod`; everything else is `mod` or `pub(crate) mod`. An exported module hides unused code from the compiler and from some clippy lints, so in the modules that stay public a new `pub fn` is checked by searching for its callers — verified by: narrowing the modules made the compiler report two unused functions and clippy one lint that the clean build had not shown, and a reference search found two more in `platform::window`.
+
+## Tooling
+- [heredoc] Text that contains a backslash is written with the Edit or Write tool, never through a Bash heredoc: the quoting layers halve or break it and nothing is written — verified by: the failed heredoc and every edit since.
