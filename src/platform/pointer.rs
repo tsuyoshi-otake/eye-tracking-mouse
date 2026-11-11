@@ -1,8 +1,9 @@
 //! Mouse output and desktop geometry.
 //!
 //! Contract: positions are physical desktop pixels (the process is per-monitor
-//! DPI aware). `move_to` and `click_left_at` only accept points that
-//! `Desktop::clamp` produced, so the cursor is never asked to leave the screens.
+//! DPI aware). `move_to` and `click_left_at` are for pixels that lie on a
+//! monitor; keeping a point on the screens is the caller's business (the
+//! control layer does it with `geometry::clamp_to_union`).
 //! A click is one atomic down+up pair: no code path can leave the button held.
 
 use std::mem::size_of;
@@ -17,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, MONITORINFOF_PRIMARY
 use windows::core::BOOL;
 
 use crate::error::{Error, Result};
-use crate::geometry::{RectI, clamp_to_union};
+use crate::geometry::RectI;
 
 /// Marks the events this app injects (visible to input hooks as `dwExtraInfo`).
 const INJECTION_TAG: usize = 0x4554_4D31; // "ETM1"
@@ -67,11 +68,6 @@ impl Desktop {
     /// Bounding box of all monitors (the "virtual screen").
     pub fn bounds(&self) -> RectI {
         self.bounds
-    }
-
-    /// Nearest on-screen pixel, or `None` for a non-finite point.
-    pub fn clamp(&self, x: f64, y: f64) -> Option<(i32, i32)> {
-        clamp_to_union(&self.monitors, x, y)
     }
 }
 
@@ -170,8 +166,7 @@ mod tests {
         let desktop = Desktop::from_monitors(&[(lower, false), (upper, true)]).unwrap();
         assert_eq!(desktop.primary(), upper);
         assert_eq!(desktop.bounds(), RectI::new(0, 0, 2560, 1980));
-        assert_eq!(desktop.clamp(2000.0, 1500.0), Some((2000, 1079)));
-        assert_eq!(desktop.clamp(f64::NAN, 0.0), None);
+        assert_eq!(desktop.monitors(), [lower, upper]);
         assert_eq!(desktop.monitor_at(1499, 1080), Some(lower));
         assert_eq!(desktop.monitor_at(1500, 1079), Some(upper));
         assert_eq!(desktop.monitor_at(1500, 1080), None, "the corner no monitor covers");

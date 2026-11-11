@@ -10,11 +10,15 @@
 //!
 //! `vision` and `control` never touch the OS, so everything they decide is tested
 //! without a camera, a face, or a desktop.
+//!
+//! Only what the program's entry point and the resident test use is public:
+//! `app::{diag, selftest, tray}`, `platform::{camera, runtime, window}` and `error`.
+//! Everything else stays inside the crate, so the compiler reports what nothing uses.
 
 pub mod app;
-pub mod control;
+mod control;
 pub mod error;
-pub mod geometry;
-pub mod image;
+mod geometry;
+mod image;
 pub mod platform;
-pub mod vision;
+mod vision;

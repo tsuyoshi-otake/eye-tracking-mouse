@@ -23,12 +23,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EndMenu, FindWindowW,
-    GetClientRect, GetMessageW, IDC_ARROW, KillTimer, LoadCursorW, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MSG,
-    MessageBoxW, PM_REMOVE, PeekMessageW, PostMessageW,
-    RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, SetTimer,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE, WM_ERASEBKGND,
-    WM_HOTKEY, WM_KEYDOWN, WM_NULL, WM_PAINT, WM_QUIT, WM_TIMER, WNDCLASSW, WNDPROC, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    GetClientRect, GetMessageW, IDC_ARROW, LoadCursorW, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MSG, MessageBoxW,
+    PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, RegisterWindowMessageW, SW_SHOW, SW_SHOWNOACTIVATE,
+    SetForegroundWindow, SetTimer, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
+    WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_NULL, WM_PAINT, WM_QUIT, WM_TIMER, WNDCLASSW, WNDPROC,
+    WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -96,7 +95,7 @@ pub fn create(
 }
 
 /// Dispatches this thread's pending window messages. Returns `false` once `WM_QUIT` arrived.
-pub fn drain_messages() -> bool {
+fn drain_messages() -> bool {
     let mut message = MSG::default();
     while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
         if message.message == WM_QUIT {
@@ -172,9 +171,11 @@ unsafe extern "system" fn report(hwnd: HWND, message: u32, wparam: WPARAM, lpara
     };
     let first = EVENTS.with(|events| {
         let mut events = events.borrow_mut();
-        // A request to paint and a timer that is due say nothing new the second time, and they are
-        // said again and again while nobody takes the notes (for as long as a menu is open, for one).
-        let said = matches!(event, Event::Paint(_) | Event::Timer(..)) && events.contains(&event);
+        // A request to paint, a timer that is due and a change of the monitors say nothing new the
+        // second time. The first two are said again and again while nobody takes the notes (for as
+        // long as a menu is open, for one), and the third is said to every window of the thread.
+        let reminder = matches!(event, Event::Paint(_) | Event::Timer(..) | Event::DisplayChanged);
+        let said = reminder && events.contains(&event);
         if !said {
             events.push_back(event);
         }
@@ -272,13 +273,9 @@ pub fn unregister_hotkey(window: Window, id: i32) {
     let _ = unsafe { UnregisterHotKey(Some(window), id) };
 }
 
-/// Reports `Event::Timer(window, id)` every `milliseconds` until `stop_timer`.
+/// Reports `Event::Timer(window, id)` every `milliseconds` for as long as the window lives.
 pub fn start_timer(window: Window, id: usize, milliseconds: u32) -> bool {
     unsafe { SetTimer(Some(window), id, milliseconds, None) != 0 }
-}
-
-pub fn stop_timer(window: Window, id: usize) {
-    let _ = unsafe { KillTimer(Some(window), id) };
 }
 
 /// Shows the window; with `focus` it also comes to the front and gets the keyboard.
@@ -289,10 +286,6 @@ pub fn show(window: Window, focus: bool) {
             let _ = SetForegroundWindow(window);
         }
     }
-}
-
-pub fn hide(window: Window) {
-    let _ = unsafe { ShowWindow(window, SW_HIDE) };
 }
 
 pub fn destroy(window: Window) {
@@ -329,14 +322,17 @@ mod tests {
             unsafe { SendMessageW(window, message, Some(WPARAM(wparam)), Some(LPARAM(7))) };
         };
         send(WM_TIMER, 1);
+        send(WM_DISPLAYCHANGE, 0);
         send(APP_MESSAGE + 5, 3);
         send(WM_TIMER, 1);
         send(WM_TIMER, 2);
+        send(WM_DISPLAYCHANGE, 0);
         send(WM_KEYDOWN, KEY_ESCAPE as usize);
         send(WM_KEYDOWN, KEY_ESCAPE as usize);
         send(WM_CLOSE, 0);
         let expected = [
             Event::Timer(window, 1),
+            Event::DisplayChanged,
             Event::Message { window, message: APP_MESSAGE + 5, wparam: 3, lparam: 7 },
             Event::Timer(window, 2),
             Event::KeyDown(window, KEY_ESCAPE),

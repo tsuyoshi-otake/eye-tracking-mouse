@@ -109,6 +109,8 @@ impl Engine {
         self.calibration.as_ref()
     }
 
+    /// For tests: what the program itself needs to know it reads from `Output::mode`.
+    #[cfg(test)]
     pub fn is_calibrating(&self) -> bool {
         self.session.is_some()
     }

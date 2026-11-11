@@ -68,7 +68,7 @@ impl Roi {
     }
 
     /// Maps a crop coordinate (0..256) to image pixels.
-    pub fn to_image(&self, x: f32, y: f32) -> Vec2 {
+    pub fn to_image(self, x: f32, y: f32) -> Vec2 {
         let half = INPUT_SIDE as f32 * 0.5;
         let (dx, dy) = ((x - half) * self.scale(), (y - half) * self.scale());
         let (sin, cos) = self.rotation.sin_cos();

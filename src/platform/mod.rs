@@ -2,11 +2,11 @@
 //! nothing in here decides what the pointer should do.
 
 pub mod camera;
-pub mod canvas;
-pub mod face_detector;
-pub mod inference;
-pub mod notify_icon;
-pub mod pointer;
+pub(crate) mod canvas;
+pub(crate) mod face_detector;
+pub(crate) mod inference;
+pub(crate) mod notify_icon;
+pub(crate) mod pointer;
 pub mod runtime;
-pub mod sound;
+pub(crate) mod sound;
 pub mod window;
