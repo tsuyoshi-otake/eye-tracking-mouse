@@ -4,6 +4,8 @@
 pub mod camera;
 pub mod face_detector;
 pub mod inference;
+pub mod notify_icon;
 pub mod pointer;
 pub mod runtime;
+pub mod sound;
 pub mod window;

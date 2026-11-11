@@ -416,6 +416,23 @@ pub(crate) mod simulation {
         }
     }
 
+    /// How the head is held while turning it for the sweep, `time` seconds in.
+    pub fn sweeping(time: f64) -> Posture {
+        let swing = time as f32;
+        Posture {
+            place: [0.2 * (2.2 * swing).sin(), 1.2, 6.7],
+            yaw: 0.14 * (2.2 * swing).sin(),
+            pitch: 0.08 * (1.7 * swing + 1.0).sin(),
+            roll: 0.03 * (0.9 * swing).sin(),
+        }
+    }
+
+    /// How the head is held while only the eyes go to `gaze`: it follows them a little, as it naturally does.
+    pub fn following(gaze: Vec2) -> Posture {
+        let middle = Vec2::new((SCREEN.left + SCREEN.right) as f32 * 0.5, (SCREEN.top + SCREEN.bottom) as f32 * 0.5);
+        Posture { yaw: -(gaze.x - middle.x) * 6e-5, pitch: (gaze.y - middle.y) * 6e-5, ..Posture::default() }
+    }
+
     /// Runs the routine at 30 frames a second until it ends, showing every
     /// view to `watch`. Returns the outcome and the time it took.
     pub fn run(person: &mut Person, behaviour: &Behaviour, mut watch: impl FnMut(&View)) -> (Step, f64) {
@@ -436,18 +453,8 @@ pub(crate) mod simulation {
             if behaviour.attentive && time - shown.1 >= 0.3 {
                 gaze = Vec2::new(view.target.0 as f32, view.target.1 as f32);
             }
-            let posture = if view.phase == Phase::Sweep && behaviour.sweeps {
-                let swing = time as f32;
-                Posture {
-                    place: [0.2 * (2.2 * swing).sin(), 1.2, 6.7],
-                    yaw: 0.14 * (2.2 * swing).sin(),
-                    pitch: 0.08 * (1.7 * swing + 1.0).sin(),
-                    roll: 0.03 * (0.9 * swing).sin(),
-                }
-            } else {
-                // The head follows the eyes a little, as it naturally does.
-                Posture { yaw: -(gaze.x - middle.x) * 6e-5, pitch: (gaze.y - middle.y) * 6e-5, ..Posture::default() }
-            };
+            let posture =
+                if view.phase == Phase::Sweep && behaviour.sweeps { sweeping(time) } else { following(gaze) };
             let blinking = behaviour.blink_every.is_some_and(|period| frame % period < 5) || time >= behaviour.shut_from;
             let mesh = person.look(time, &posture, gaze, if blinking { 0.0 } else { 1.0 });
             let in_view = !(behaviour.away.0..behaviour.away.1).contains(&time);
