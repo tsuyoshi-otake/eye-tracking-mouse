@@ -59,6 +59,11 @@ impl Desktop {
         self.primary
     }
 
+    /// The monitor the pixel is on, if it is on any.
+    pub fn monitor_at(&self, x: i32, y: i32) -> Option<RectI> {
+        self.monitors.iter().copied().find(|monitor| monitor.contains(x, y))
+    }
+
     /// Bounding box of all monitors (the "virtual screen").
     pub fn bounds(&self) -> RectI {
         self.bounds
@@ -167,6 +172,9 @@ mod tests {
         assert_eq!(desktop.bounds(), RectI::new(0, 0, 2560, 1980));
         assert_eq!(desktop.clamp(2000.0, 1500.0), Some((2000, 1079)));
         assert_eq!(desktop.clamp(f64::NAN, 0.0), None);
+        assert_eq!(desktop.monitor_at(1499, 1080), Some(lower));
+        assert_eq!(desktop.monitor_at(1500, 1079), Some(upper));
+        assert_eq!(desktop.monitor_at(1500, 1080), None, "the corner no monitor covers");
     }
 
     #[test]

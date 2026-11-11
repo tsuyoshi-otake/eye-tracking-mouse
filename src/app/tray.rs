@@ -1,5 +1,6 @@
 //! The resident program: an icon in the notification area, its menu, the
-//! hotkeys, and the worker that does the pointing.
+//! hotkeys, the calibration page, the camera preview, and the worker that
+//! does the pointing.
 //!
 //! Everything here runs on the thread that owns the windows and handles one
 //! event at a time (see `platform::window`), so nothing in it is shared.
@@ -12,6 +13,8 @@
 //!   because it could not start, which it says in a box first.
 //! - After start-up nothing here fails: trouble is shown next to the icon and
 //!   written to the log, and the program keeps running.
+//! - The worker calibrates only while the calibration page is open: when the
+//!   page goes, for whatever reason, its run ends with it.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -20,16 +23,23 @@ use crate::error::{Context, Error, Result};
 use crate::geometry::RectI;
 use crate::platform::camera::CameraRequest;
 use crate::platform::notify_icon::{self, MenuItem, NotifyIcon};
+use crate::platform::pointer::{self, Desktop};
+use crate::platform::runtime;
 use crate::platform::window::{self, Event, Kind, Poster, Window};
 
+use super::calibration_screen::CalibrationScreen;
 use super::icon::{self, Look};
 use super::log::Log;
-use super::pipeline::{Pipeline, Setup, Status};
+use super::pipeline::{CalibrationProblem, Notice, Pipeline, Setup, Status};
+use super::preview::PreviewWindow;
 use super::storage::Storage;
 use super::wording::{self, Message};
 
 /// The class of the hidden main window. Other starts of the program find the running one by it.
 pub const MAIN_CLASS: &str = "EyeTrackingMouseMain";
+/// The class of the windows the person sees: the calibration page and the preview. It is not
+/// the main window's, so that looking for the running program never finds one of them.
+pub const VIEW_CLASS: &str = "EyeTrackingMouseView";
 /// Messages to the main window: from the icon, from the worker, and from other starts of the program.
 const FROM_ICON: u32 = window::APP_MESSAGE + 1;
 const FROM_WORKER: u32 = window::APP_MESSAGE + 2;
@@ -39,17 +49,22 @@ const SECOND_START: u32 = window::APP_MESSAGE + 4;
 const TASKBAR_CREATED: &str = "TaskbarCreated";
 /// How long `quit_running` waits for the running program to go away. Its own shutdown takes two seconds at most.
 const QUIT_WAIT: Duration = Duration::from_secs(5);
+/// Why a calibration run is given up when the camera has gone quiet behind the page.
+const CAMERA_SILENT: &str = "the camera sends no pictures";
 
-/// What the person can ask for, from the menu or with a hotkey. The numbers identify menu items and hotkeys.
+/// What the person can ask for, from the menu or with a hotkey. The numbers identify the menu
+/// items and the hotkeys; a hotkey reaches the main window as `WM_HOTKEY` carrying its number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
+pub enum Action {
     Pause = 1,
+    Calibrate,
+    Preview,
     Settings,
     Quit,
 }
 
 impl Action {
-    const ALL: [Action; 3] = [Action::Pause, Action::Settings, Action::Quit];
+    const ALL: [Action; 5] = [Action::Pause, Action::Calibrate, Action::Preview, Action::Settings, Action::Quit];
 
     fn from_id(id: u32) -> Option<Action> {
         Action::ALL.into_iter().find(|&action| action as u32 == id)
@@ -57,7 +72,7 @@ impl Action {
 }
 
 /// Ctrl+Alt+letter for the actions that have a hotkey.
-const HOTKEYS: [(Action, char); 2] = [(Action::Pause, 'P'), (Action::Quit, 'Q')];
+const HOTKEYS: [(Action, char); 3] = [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Quit, 'Q')];
 
 #[derive(PartialEq, Eq)]
 enum Flow {
@@ -91,7 +106,8 @@ fn run_with_window(options: &Options) -> Result<()> {
     // The window comes before anything slow, so that a second start finds it.
     window::register_reporting_class(MAIN_CLASS)?;
     let main = window::open(MAIN_CLASS, wording::APP_NAME, Kind::Hidden, RectI::default())?;
-    let outcome = App::start(main, options).map(|mut app| {
+    let started = window::register_reporting_class(VIEW_CLASS).and_then(|()| App::start(main, options));
+    let outcome = started.map(|mut app| {
         app.serve();
         app.shut_down();
     });
@@ -117,6 +133,24 @@ fn tip(status: &Status) -> String {
     format!("{}: {}", wording::APP_NAME, wording::status(status))
 }
 
+/// Whether the camera's pictures are coming in while the worker is in this state.
+fn is_watching(status: &Status) -> bool {
+    matches!(status, Status::Pointing(_) | Status::Calibrating)
+}
+
+/// The screen a calibration run is for: the one the pointer is on, or the main one while the pointer cannot be found.
+fn screen_under_pointer() -> Result<RectI> {
+    let desktop = Desktop::query()?;
+    let under = pointer::cursor_position().and_then(|(x, y)| desktop.monitor_at(x, y));
+    Ok(under.unwrap_or(desktop.primary()))
+}
+
+/// A calibration run, by the number the worker knows it by, and the page that shows it.
+struct Run {
+    number: u32,
+    page: CalibrationScreen,
+}
+
 struct App {
     window: Window,
     icon: NotifyIcon,
@@ -126,6 +160,8 @@ struct App {
     /// The worker's status as last shown.
     status: Status,
     taskbar_created: u32,
+    calibration: Option<Run>,
+    preview: Option<PreviewWindow>,
 }
 
 impl App {
@@ -154,7 +190,8 @@ impl App {
             poster.post();
         })?;
         let taskbar_created = window::registered_message(TASKBAR_CREATED);
-        let mut app = App { window, icon, pipeline, storage, log, status, taskbar_created };
+        let mut app =
+            App { window, icon, pipeline, storage, log, status, taskbar_created, calibration: None, preview: None };
         if problems.is_empty() {
             app.show(&wording::started(app.storage.has_calibration()));
         } else {
@@ -175,10 +212,13 @@ impl App {
         }
     }
 
-    fn shut_down(self) {
+    fn shut_down(mut self) {
         for (action, _) in HOTKEYS {
             window::unregister_hotkey(self.window, action as i32);
         }
+        // The windows go before the worker is asked to stop: a run ends with its page.
+        self.close_calibration();
+        self.close_preview();
         let App { pipeline, icon, mut log, .. } = self;
         pipeline.stop();
         drop(icon);
@@ -192,6 +232,9 @@ impl App {
                 self.log.line("asked to close");
                 return Flow::Quit;
             }
+            Event::Close(window) | Event::KeyDown(window, window::KEY_ESCAPE) => self.dismiss(window),
+            Event::Paint(window) => self.paint(window),
+            Event::Timer(window, _) if self.shows_page(window) => self.watch_camera(),
             Event::Message { window, message, lparam, .. } if window == self.window => match message {
                 FROM_ICON if notify_icon::wants_menu(lparam) => {
                     let chosen = self.icon.menu(&self.menu());
@@ -220,12 +263,16 @@ impl App {
 
     fn menu(&self) -> Vec<MenuItem<'static>> {
         let pause = if self.pipeline.is_paused() { wording::MENU_RESUME } else { wording::MENU_PAUSE };
+        let calibrate = if self.calibration.is_some() { wording::MENU_CALIBRATE_STOP } else { wording::MENU_CALIBRATE };
+        let item = |action: Action, label, checked| MenuItem::Action { id: action as u32, label, checked };
         vec![
-            MenuItem::Action { id: Action::Pause as u32, label: pause, checked: false },
+            item(Action::Pause, pause, false),
+            item(Action::Calibrate, calibrate, false),
+            item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
-            MenuItem::Action { id: Action::Settings as u32, label: wording::MENU_SETTINGS, checked: false },
+            item(Action::Settings, wording::MENU_SETTINGS, false),
             MenuItem::Separator,
-            MenuItem::Action { id: Action::Quit as u32, label: wording::MENU_QUIT, checked: false },
+            item(Action::Quit, wording::MENU_QUIT, false),
         ]
     }
 
@@ -236,6 +283,10 @@ impl App {
                 self.pipeline.set_paused(paused);
                 self.log.line(if paused { "paused by the person" } else { "resumed by the person" });
             }
+            Some(Action::Calibrate) if self.calibration.is_some() => self.cancel_calibration(),
+            Some(Action::Calibrate) => self.start_calibration(),
+            Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
+            Some(Action::Preview) => self.open_preview(),
             Some(Action::Settings) => self.open_settings(),
             Some(Action::Quit) => {
                 self.log.line("quit by the person");
@@ -254,18 +305,140 @@ impl App {
         }
     }
 
+    fn shows_page(&self, window: Window) -> bool {
+        self.calibration.as_ref().is_some_and(|run| run.page.window() == window)
+    }
+
+    /// Opens the calibration page on the screen the pointer is on and starts a run for that screen.
+    fn start_calibration(&mut self) {
+        if matches!(self.status, Status::Stopped(_)) {
+            // Without the worker there is nothing to calibrate with; the person is told again why it is gone.
+            if let Some(message) = wording::trouble(&self.status) {
+                self.show(&message);
+            }
+            return;
+        }
+        let (frames, now) = (self.pipeline.frames(), runtime::seconds());
+        let opened = screen_under_pointer()
+            .and_then(|area| CalibrationScreen::open(VIEW_CLASS, area, frames, now).map(|page| (area, page)));
+        match opened {
+            Ok((area, page)) => {
+                let number = self.pipeline.start_calibration(area);
+                let (left, top, width, height) = (area.left, area.top, area.width(), area.height());
+                self.log.line(&format!("calibration run {number} started for the screen at {left},{top} ({width}x{height})"));
+                self.calibration = Some(Run { number, page });
+            }
+            Err(error) => self.show(&wording::window_not_opened(error.message())),
+        }
+    }
+
+    /// Takes the calibration page away, which ends its run if that has not ended by itself.
+    /// Returns the number of the run, if there was a page.
+    fn close_calibration(&mut self) -> Option<u32> {
+        let run = self.calibration.take()?;
+        self.pipeline.cancel_calibration(run.number);
+        Some(run.number)
+    }
+
+    fn cancel_calibration(&mut self) {
+        if let Some(number) = self.close_calibration() {
+            self.log.line(&format!("calibration run {number} cancelled by the person"));
+        }
+    }
+
+    /// Asked a few times a second while the calibration page is open: a camera that has gone
+    /// quiet must not leave the person in front of a page that covers their screen.
+    fn watch_camera(&mut self) {
+        let (frames, now) = (self.pipeline.frames(), runtime::seconds());
+        if self.calibration.as_mut().is_some_and(|run| run.page.camera_is_silent(frames, now)) {
+            self.close_calibration();
+            self.show(&wording::calibration_failed(&CalibrationProblem::Camera(CAMERA_SILENT.to_string())));
+        }
+    }
+
+    fn open_preview(&mut self) {
+        let opened = Desktop::query().and_then(|desktop| PreviewWindow::open(VIEW_CLASS, desktop.primary()));
+        match opened {
+            Ok(mut preview) => {
+                preview.describe(wording::status(&self.status), is_watching(&self.status));
+                self.preview = Some(preview);
+                self.pipeline.set_preview(true);
+                self.log.line("preview opened");
+            }
+            Err(error) => self.show(&wording::window_not_opened(error.message())),
+        }
+    }
+
+    fn close_preview(&mut self) {
+        if self.preview.take().is_some() {
+            self.pipeline.set_preview(false);
+            self.log.line("preview closed");
+        }
+    }
+
+    /// The person wants one of the program's windows gone.
+    fn dismiss(&mut self, window: Window) {
+        if self.shows_page(window) {
+            self.cancel_calibration();
+        } else if self.preview.as_ref().is_some_and(|preview| preview.window() == window) {
+            self.close_preview();
+        }
+    }
+
+    fn paint(&mut self, window: Window) {
+        if let Some(run) = self.calibration.as_mut().filter(|run| run.page.window() == window) {
+            run.page.draw();
+        } else if let Some(preview) = self.preview.as_mut().filter(|preview| preview.window() == window) {
+            preview.draw();
+        }
+    }
+
     /// Takes in what the worker has to tell.
     fn news(&mut self) {
         let news = self.pipeline.take();
+        let shown = self.calibration.as_ref().map(|run| run.number);
         for notice in &news.notices {
             self.show(&wording::notice(notice));
+            let ended = match notice {
+                Notice::CalibrationDone { run, .. } | Notice::CalibrationFailed { run, .. } => Some(*run),
+                _ => None,
+            };
+            // The run on the page is over, so the page has nothing more to show.
+            if ended.is_some() && ended == shown {
+                self.close_calibration();
+            }
         }
-        if news.status == self.status {
-            return;
+        match (&mut self.calibration, news.view) {
+            // The view of an earlier run may still be around; this page is not for it.
+            (Some(run), Some((number, view))) if run.number == number => run.page.show(view),
+            _ => {}
         }
+        let changed = news.status != self.status;
+        if changed {
+            self.turn(news.status);
+        }
+        if matches!(self.status, Status::Stopped(_)) {
+            // The worker is gone, and the run with it.
+            self.close_calibration();
+        }
+        if let Some(preview) = &mut self.preview {
+            let watching = is_watching(&self.status);
+            if changed {
+                preview.describe(wording::status(&self.status), watching);
+            }
+            // During a break no picture is taken, so that none from before it shows up in it.
+            let fresh = watching && self.pipeline.take_preview(preview.picture());
+            if changed || fresh {
+                preview.draw();
+            }
+        }
+    }
+
+    /// Shows the status the worker has turned to: on the icon, in the log, and next to the icon when it means trouble.
+    fn turn(&mut self, status: Status) {
         // The kind of status, as opposed to its details (which activity, which reason).
-        let turned = std::mem::discriminant(&news.status) != std::mem::discriminant(&self.status);
-        self.status = news.status;
+        let turned = std::mem::discriminant(&status) != std::mem::discriminant(&self.status);
+        self.status = status;
         // While pointing, the activity changes all the time; that is shown but not recorded.
         if turned || !matches!(self.status, Status::Pointing(_)) {
             self.log.line(&wording::status(&self.status));
@@ -300,5 +473,14 @@ mod tests {
         assert_eq!(Action::from_id(0), None);
         assert_eq!(Action::from_id(Action::ALL.len() as u32 + 1), None);
         assert!(HOTKEYS.iter().all(|(action, key)| Action::ALL.contains(action) && key.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn the_camera_delivers_only_while_pointing_or_calibrating() {
+        use crate::control::controller::Activity;
+        assert!(is_watching(&Status::Pointing(Activity::NoFace)) && is_watching(&Status::Calibrating));
+        for idle in [Status::Starting, Status::Paused, Status::Waiting(String::new()), Status::Stopped(String::new())] {
+            assert!(!is_watching(&idle), "{idle:?}");
+        }
     }
 }

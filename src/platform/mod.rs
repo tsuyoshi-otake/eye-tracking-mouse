@@ -2,6 +2,7 @@
 //! nothing in here decides what the pointer should do.
 
 pub mod camera;
+pub mod canvas;
 pub mod face_detector;
 pub mod inference;
 pub mod notify_icon;

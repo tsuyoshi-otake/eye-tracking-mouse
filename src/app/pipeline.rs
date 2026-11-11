@@ -8,13 +8,22 @@
 //!   of a frame, and the worker lets go of the camera at its next step.
 //! - A camera or tracker that fails is tried again after a growing wait, for
 //!   as long as the program runs. `Status::Waiting` says what is wrong meanwhile.
-//! - A calibration asked for with `start_calibration` ends with exactly one
-//!   `Notice::CalibrationDone` or `Notice::CalibrationFailed`, unless
-//!   `cancel_calibration` was called.
+//! - Every calibration run has a number, handed out by `start_calibration`.
+//!   While the run is under way, `News::view` carries that number. The run
+//!   ends with exactly one `Notice::CalibrationDone` or
+//!   `Notice::CalibrationFailed` carrying it, or without a word when
+//!   `cancel_calibration` was called for it, when a newer run was asked for,
+//!   or when the worker itself ended (`Status::Stopped`).
 //! - `stop` returns within `STOP_WAIT` whatever the worker is doing. A worker
 //!   stuck in a camera read is left behind and ends with the process.
+//! - `frames` counts the camera frames taken in, so the owner can tell a
+//!   worker that is busy from one whose camera has gone quiet.
+//! - While `set_preview(true)` holds, the worker keeps one picture of what
+//!   the camera sees ready for `take_preview`, and makes the next one only
+//!   after that one was taken. After `set_preview(false)` none is kept.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -34,6 +43,7 @@ use crate::vision::landmarks::FaceMesh;
 use super::backoff::Backoff;
 use super::engine::{Engine, GazeProblem, Input, Mode, Output, PointerAction, gaze_problem};
 use super::face::{self, Tracker};
+use super::preview::{self, Picture};
 use super::storage::Storage;
 
 /// How long `stop` waits for the worker.
@@ -74,9 +84,10 @@ pub enum CalibrationProblem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
-    /// A calibration run succeeded. `saved` tells whether it will still be there after a restart.
-    CalibrationDone { error_px: f32, saved: std::result::Result<(), String> },
-    CalibrationFailed(CalibrationProblem),
+    /// Calibration run `run` succeeded. `saved` tells whether it will still be there after a restart.
+    CalibrationDone { run: u32, error_px: f32, saved: std::result::Result<(), String> },
+    /// Calibration run `run` ended without a result.
+    CalibrationFailed { run: u32, problem: CalibrationProblem },
     /// The calibration cannot be used for gaze jumps as things are; pointing with the head goes on.
     GazeUnavailable(GazeProblem),
     /// The saved calibration could not be read; the text says why.
@@ -87,8 +98,8 @@ pub enum Notice {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct News {
     pub status: Status,
-    /// What to show while a calibration run is under way.
-    pub view: Option<View>,
+    /// While a calibration run is under way: its number and what to show.
+    pub view: Option<(u32, View)>,
     /// What happened since the last look, oldest first.
     pub notices: Vec<Notice>,
 }
@@ -102,22 +113,47 @@ pub struct Setup {
 enum Command {
     /// The shared flags changed.
     Wake,
-    StartCalibration(RectI),
-    CancelCalibration,
+    StartCalibration { run: u32, area: RectI },
+    CancelCalibration(u32),
     DisplayChanged,
     Quit,
+}
+
+/// The picture for the preview window, on its way from the worker to the owner.
+#[derive(Default)]
+struct Preview {
+    picture: Picture,
+    /// True from when the worker made the picture until the owner takes it.
+    fresh: bool,
 }
 
 struct Shared {
     /// Written only by the owner.
     paused: AtomicBool,
+    /// Written only by the owner.
+    preview_wanted: AtomicBool,
+    /// Camera frames taken in so far. Written only by the worker.
+    frames: AtomicU64,
     /// True from a `notify` until the owner looks.
     news_waiting: AtomicBool,
     board: Mutex<News>,
+    preview: Mutex<Preview>,
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Shared {
+    fn new(notify: impl Fn() + Send + Sync + 'static) -> Shared {
+        Shared {
+            paused: AtomicBool::new(false),
+            preview_wanted: AtomicBool::new(false),
+            frames: AtomicU64::new(0),
+            news_waiting: AtomicBool::new(false),
+            board: Mutex::new(News::default()),
+            preview: Mutex::new(Preview::default()),
+            notify: Box::new(notify),
+        }
+    }
+
     fn board(&self) -> MutexGuard<'_, News> {
         // The board holds plain values, so it is still good after a panic elsewhere.
         self.board.lock().unwrap_or_else(PoisonError::into_inner)
@@ -129,7 +165,7 @@ impl Shared {
         }
     }
 
-    fn set(&self, status: Status, view: Option<View>) {
+    fn set(&self, status: Status, view: Option<(u32, View)>) {
         let changed = {
             let mut board = self.board();
             let changed = board.status != status || board.view != view;
@@ -152,30 +188,64 @@ impl Shared {
         }
         self.announce();
     }
+
+    fn preview(&self) -> MutexGuard<'_, Preview> {
+        // A picture is good or simply replaced, whatever happened while it was held.
+        self.preview.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes a picture of the frame for the preview, if one is wanted and the last one has been looked at.
+    fn offer_preview(&self, frame: &BgraFrame, mesh: Option<&FaceMesh>) {
+        {
+            let mut preview = self.preview();
+            // Asked while the picture is held, so that none is made after `set_preview(false)` has cleared up.
+            if preview.fresh || !self.preview_wanted.load(Ordering::SeqCst) {
+                return;
+            }
+            preview::compose(frame, mesh, &mut preview.picture);
+            preview.fresh = true;
+        }
+        self.announce();
+    }
+
+    fn set_preview(&self, wanted: bool) {
+        self.preview_wanted.store(wanted, Ordering::SeqCst);
+        if !wanted {
+            *self.preview() = Preview::default();
+        }
+    }
+
+    fn take_preview(&self, picture: &mut Picture) -> bool {
+        let mut preview = self.preview();
+        if !preview.fresh {
+            return false;
+        }
+        // The worker draws its next picture into the buffer handed back here.
+        std::mem::swap(&mut preview.picture, picture);
+        preview.fresh = false;
+        true
+    }
 }
 
 pub struct Pipeline {
     shared: Arc<Shared>,
     commands: Sender<Command>,
     worker: JoinHandle<()>,
+    /// The number of the calibration run asked for last.
+    last_run: Cell<u32>,
 }
 
 impl Pipeline {
     /// `notify` is called on the worker thread and must only pass the word on.
     pub fn start(setup: Setup, notify: impl Fn() + Send + Sync + 'static) -> Result<Pipeline> {
-        let shared = Arc::new(Shared {
-            paused: AtomicBool::new(false),
-            news_waiting: AtomicBool::new(false),
-            board: Mutex::new(News::default()),
-            notify: Box::new(notify),
-        });
+        let shared = Arc::new(Shared::new(notify));
         let (commands, inbox) = channel();
         let for_worker = shared.clone();
         let worker = std::thread::Builder::new()
             .name("pipeline".to_string())
             .spawn(move || run(&for_worker, inbox, setup))
             .context("start the camera thread")?;
-        Ok(Pipeline { shared, commands, worker })
+        Ok(Pipeline { shared, commands, worker, last_run: Cell::new(0) })
     }
 
     fn send(&self, command: Command) {
@@ -192,14 +262,19 @@ impl Pipeline {
         self.send(Command::Wake);
     }
 
-    /// Starts a calibration run on the screen `area` (desktop pixels), ending a pause if there is one.
-    pub fn start_calibration(&self, area: RectI) {
+    /// Starts a calibration run on the screen `area` (desktop pixels), ending a pause if there is
+    /// one and taking the place of a run that is still going. Returns the number of the new run.
+    pub fn start_calibration(&self, area: RectI) -> u32 {
+        let run = self.last_run.get().wrapping_add(1);
+        self.last_run.set(run);
         self.shared.paused.store(false, Ordering::SeqCst);
-        self.send(Command::StartCalibration(area));
+        self.send(Command::StartCalibration { run, area });
+        run
     }
 
-    pub fn cancel_calibration(&self) {
-        self.send(Command::CancelCalibration);
+    /// Ends run `run` without a result and without a notice. Nothing happens when it is over already.
+    pub fn cancel_calibration(&self, run: u32) {
+        self.send(Command::CancelCalibration(run));
     }
 
     /// Tells the worker that the monitors are not what they were.
@@ -213,6 +288,22 @@ impl Pipeline {
         self.shared.news_waiting.store(false, Ordering::SeqCst);
         let mut board = self.shared.board();
         News { status: board.status.clone(), view: board.view, notices: std::mem::take(&mut board.notices) }
+    }
+
+    /// How many camera frames the worker has taken in so far.
+    pub fn frames(&self) -> u64 {
+        self.shared.frames.load(Ordering::SeqCst)
+    }
+
+    /// Asks for pictures of what the camera sees, or says that no more are needed.
+    /// A picture that was waiting to be taken is thrown away then.
+    pub fn set_preview(&self, wanted: bool) {
+        self.shared.set_preview(wanted);
+    }
+
+    /// Exchanges `picture` for a newer one, if there is one. False when `picture` is left as it was.
+    pub fn take_preview(&self, picture: &mut Picture) -> bool {
+        self.shared.take_preview(picture)
     }
 
     pub fn stop(self) {
@@ -282,8 +373,11 @@ struct Worker<'a> {
     /// The camera is not opened before this time.
     retry_at: f64,
     gaps: u32,
-    /// A calibration run waiting for the camera to deliver.
-    pending_calibration: Option<RectI>,
+    /// A calibration run waiting for the camera to deliver: its number and its screen.
+    pending_calibration: Option<(u32, RectI)>,
+    /// The number of the run the engine is working on: there exactly while the engine is
+    /// calibrating, and never together with a run that is waiting.
+    run: Option<u32>,
     /// What the owner was last told about the gaze.
     gaze_problem: Option<GazeProblem>,
     beeper: Beeper,
@@ -311,6 +405,7 @@ impl<'a> Worker<'a> {
             retry_at: 0.0,
             gaps: 0,
             pending_calibration: None,
+            run: None,
             gaze_problem: None,
             beeper: Beeper::new(),
             frame: BgraFrame::default(),
@@ -378,13 +473,17 @@ impl<'a> Worker<'a> {
         match command {
             Command::Quit => return Flow::Quit,
             Command::Wake => self.retry_now(),
-            Command::StartCalibration(area) => {
-                self.pending_calibration = Some(area);
+            Command::StartCalibration { run, area } => {
+                // A run that is still going makes way without a word, like one that was cancelled.
+                self.abandon_run();
+                self.pending_calibration = Some((run, area));
                 self.retry_now();
             }
-            Command::CancelCalibration => {
-                self.pending_calibration = None;
-                self.engine.cancel_calibration();
+            Command::CancelCalibration(run) => {
+                self.pending_calibration.take_if(|(waiting, _)| *waiting == run);
+                if self.run == Some(run) {
+                    self.abandon_run();
+                }
             }
             Command::DisplayChanged => {
                 self.desktop = Desktop::query().ok();
@@ -400,11 +499,25 @@ impl<'a> Worker<'a> {
         self.backoff.reset();
     }
 
+    /// Hands a run that was waiting for the camera to the engine, now that there is a frame.
+    fn begin_waiting_run(&mut self, frame_size: (u32, u32), time: f64) {
+        if let Some((run, area)) = self.pending_calibration.take() {
+            self.engine.start_calibration(area, frame_size, time);
+            self.run = Some(run);
+        }
+    }
+
+    /// Takes the run the engine is working on away from it. Returns its number, if there was one.
+    fn abandon_run(&mut self) -> Option<u32> {
+        self.engine.cancel_calibration();
+        self.run.take()
+    }
+
     /// Ends a calibration run that is under way or waiting to start, telling the owner why.
     fn end_calibration(&mut self, problem: CalibrationProblem) {
-        let waiting = self.pending_calibration.take().is_some();
-        if self.engine.cancel_calibration() || waiting {
-            self.shared.notice(Notice::CalibrationFailed(problem));
+        let waiting = self.pending_calibration.take().map(|(run, _)| run);
+        if let Some(run) = self.abandon_run().or(waiting) {
+            self.shared.notice(Notice::CalibrationFailed { run, problem });
         }
     }
 
@@ -450,19 +563,19 @@ impl<'a> Worker<'a> {
         }
         self.gaps = 0;
         self.backoff.reset();
+        self.shared.frames.fetch_add(1, Ordering::SeqCst);
         let found = match tracker.track(&self.frame, &mut self.mesh) {
             Ok(found) => found,
             Err(error) => return self.failed(&error),
         };
+        self.shared.offer_preview(&self.frame, found.then_some(&self.mesh));
         let time = self.frame.timestamp;
         let frame_size = (self.frame.width as u32, self.frame.height as u32);
         if self.desktop.is_none() && time - self.desktop_asked >= 1.0 {
             self.desktop_asked = time;
             self.desktop = Desktop::query().ok();
         }
-        if let Some(area) = self.pending_calibration.take() {
-            self.engine.start_calibration(area, frame_size, time);
-        }
+        self.begin_waiting_run(frame_size, time);
         let screens = self.desktop.as_ref().map_or(&[][..], Desktop::monitors);
         let output = self.engine.frame(&Input {
             time,
@@ -498,13 +611,15 @@ impl<'a> Worker<'a> {
     }
 
     fn report(&mut self, output: &Output, problem: Option<GazeProblem>, refused: bool) {
-        if let Some(outcome) = output.finished {
+        // The engine ends only a run it was working on, so the number is there whenever an outcome is.
+        if let (Some(outcome), Some(run)) = (output.finished, self.run) {
+            self.run = None;
             self.shared.notice(match outcome {
                 Ok(error_px) => {
                     let saved = self.engine.calibration().map_or(Ok(()), |c| self.storage.save_calibration(c));
-                    Notice::CalibrationDone { error_px, saved: saved.map_err(|error| error.message().to_string()) }
+                    Notice::CalibrationDone { run, error_px, saved: saved.map_err(|error| error.message().to_string()) }
                 }
-                Err(failure) => Notice::CalibrationFailed(CalibrationProblem::Routine(failure)),
+                Err(failure) => Notice::CalibrationFailed { run, problem: CalibrationProblem::Routine(failure) },
             });
         }
         if problem != self.gaze_problem {
@@ -514,7 +629,7 @@ impl<'a> Worker<'a> {
             }
         }
         let (status, view) = match output.mode {
-            Mode::Calibrating(view) => (Status::Calibrating, Some(view)),
+            Mode::Calibrating(view) => (Status::Calibrating, self.run.map(|run| (run, view))),
             Mode::Pointing(_) if refused => (Status::Pointing(Activity::Blocked), None),
             Mode::Pointing(activity) => (Status::Pointing(activity), None),
         };
@@ -525,6 +640,7 @@ impl<'a> Worker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::calibration::Phase;
     use std::sync::atomic::AtomicUsize;
 
     /// A camera index no machine has, so the worker never gets a frame and never touches the pointer.
@@ -552,15 +668,120 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_missing_camera_is_waited_for_and_pause_calibration_and_stop_still_work() {
-        let scratch = Scratch(std::env::temp_dir().join(format!("etm-pipeline-test-{}", std::process::id())));
+    /// A folder of the test's own, and what a worker needs to start: no camera, the usual tuning.
+    fn setup(name: &str) -> (Scratch, Setup) {
+        let scratch = Scratch(std::env::temp_dir().join(format!("etm-pipeline-{name}-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&scratch.0);
         let setup = Setup {
             camera: CameraRequest { device_index: NO_SUCH_CAMERA, ..CameraRequest::default() },
             tuning: Tuning::default(),
             storage: Storage::open(&scratch.0).unwrap(),
         };
+        (scratch, setup)
+    }
+
+    #[test]
+    fn a_run_ends_with_one_notice_of_its_own_number_or_silently_when_cancelled_or_replaced() {
+        let (_scratch, setup) = setup("runs");
+        let shared = Shared::new(|| {});
+        let (_commands, inbox) = channel();
+        let mut worker = Worker::new(&shared, inbox, setup);
+        let area = RectI::new(0, 0, 1920, 1080);
+        let notices = || std::mem::take(&mut shared.board().notices);
+        let failed = |run| vec![Notice::CalibrationFailed { run, problem: CalibrationProblem::DisplayChanged }];
+
+        // While a run waits for the camera, only its own number cancels it.
+        worker.obey(Command::StartCalibration { run: 1, area });
+        worker.obey(Command::CancelCalibration(2));
+        worker.obey(Command::DisplayChanged);
+        assert_eq!(notices(), failed(1));
+        worker.obey(Command::DisplayChanged);
+        assert!(notices().is_empty(), "a run ends once");
+
+        worker.obey(Command::StartCalibration { run: 2, area });
+        worker.obey(Command::CancelCalibration(2));
+        worker.obey(Command::DisplayChanged);
+        assert!(notices().is_empty(), "a cancelled run ends without a word");
+
+        // A newer run takes the place of one that waits ...
+        worker.obey(Command::StartCalibration { run: 3, area });
+        worker.obey(Command::StartCalibration { run: 4, area });
+        worker.begin_waiting_run((1280, 720), 0.0);
+        assert!(worker.engine.is_calibrating() && worker.run == Some(4));
+        worker.obey(Command::CancelCalibration(3));
+        assert!(worker.engine.is_calibrating(), "the number of another run does not end this one");
+        // ... and of one the engine is working on.
+        worker.obey(Command::StartCalibration { run: 5, area });
+        assert!(!worker.engine.is_calibrating() && worker.run.is_none());
+        worker.begin_waiting_run((1280, 720), 1.0);
+        worker.obey(Command::DisplayChanged);
+        assert_eq!(notices(), failed(5), "runs 3 and 4 made way without a word");
+        assert!(!worker.engine.is_calibrating());
+
+        worker.obey(Command::StartCalibration { run: 6, area });
+        worker.begin_waiting_run((1280, 720), 2.0);
+        worker.obey(Command::CancelCalibration(6));
+        assert!(!worker.engine.is_calibrating());
+        worker.obey(Command::DisplayChanged);
+        assert!(notices().is_empty());
+
+        // What the engine reports is passed on under the run's number: its view, then its ending.
+        worker.obey(Command::StartCalibration { run: 7, area });
+        worker.begin_waiting_run((1280, 720), 3.0);
+        let seen = || {
+            let board = shared.board();
+            (board.status.clone(), board.view)
+        };
+        let view = View { phase: Phase::Rest, target: (960, 540), dwell: 0.0, progress: 0.0, face_visible: true };
+        let quiet = |mode, finished| Output { pointer: None, sound: None, mode, finished };
+        worker.report(&quiet(Mode::Calibrating(view), None), None, false);
+        assert_eq!(seen(), (Status::Calibrating, Some((7, view))));
+        let ended = quiet(Mode::Pointing(Activity::Tracking), Some(Err(Failure::FaceLost)));
+        worker.report(&ended, None, false);
+        let problem = CalibrationProblem::Routine(Failure::FaceLost);
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 7, problem }]);
+        assert_eq!(seen(), (Status::Pointing(Activity::Tracking), None));
+        assert_eq!(worker.run, None);
+    }
+
+    #[test]
+    fn a_picture_for_the_preview_is_made_only_when_wanted_and_after_the_last_was_taken() {
+        let announced = Arc::new(AtomicUsize::new(0));
+        let counter = announced.clone();
+        let shared = Shared::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let frame = |shade: u8| {
+            let mut frame = BgraFrame::new(8, 4);
+            frame.data.fill(shade);
+            frame
+        };
+        let mut picture = Picture::default();
+
+        shared.offer_preview(&frame(1), None);
+        assert!(!shared.take_preview(&mut picture), "nobody asked for a picture");
+        assert_eq!(announced.load(Ordering::SeqCst), 0);
+
+        shared.set_preview(true);
+        shared.offer_preview(&frame(1), None);
+        assert_eq!(announced.load(Ordering::SeqCst), 1, "the owner is told that there is a picture");
+        shared.offer_preview(&frame(2), None);
+        assert!(shared.take_preview(&mut picture));
+        assert_eq!((picture.width, picture.height, picture.pixels[0]), (8, 4, 0x0001_0101), "the first one waited");
+        assert!(!shared.take_preview(&mut picture), "a picture is handed over once");
+
+        shared.offer_preview(&frame(3), None);
+        shared.set_preview(false);
+        assert!(!shared.take_preview(&mut picture), "what was waiting is thrown away");
+        shared.offer_preview(&frame(4), None);
+        assert!(!shared.take_preview(&mut picture));
+        assert_eq!(picture.pixels[0], 0x0001_0101, "the owner's picture is left as it was");
+        assert_eq!(shared.preview().picture, Picture::default(), "and none is kept");
+    }
+
+    #[test]
+    fn a_missing_camera_is_waited_for_and_pause_calibration_and_stop_still_work() {
+        let (_scratch, setup) = setup("camera");
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let pipeline = Pipeline::start(setup, move || {
@@ -574,14 +795,20 @@ mod tests {
         assert!(calls.load(Ordering::SeqCst) >= 1, "the owner was told that there is news");
 
         // A calibration cannot start without a camera, and says so exactly once.
-        pipeline.start_calibration(RectI::new(0, 0, 1920, 1080));
+        let run = pipeline.start_calibration(RectI::new(0, 0, 1920, 1080));
         wait_for(&pipeline, &mut notices, |_, notices| !notices.is_empty());
         std::thread::sleep(Duration::from_millis(300));
         wait_for(&pipeline, &mut notices, |_, _| true);
         assert!(
-            matches!(notices.as_slice(), [Notice::CalibrationFailed(CalibrationProblem::Camera(_))]),
+            matches!(
+                notices.as_slice(),
+                [Notice::CalibrationFailed { run: failed, problem: CalibrationProblem::Camera(_) }] if *failed == run
+            ),
             "{notices:?}"
         );
+        assert_ne!(pipeline.start_calibration(RectI::new(0, 0, 1920, 1080)), run, "every run has a number of its own");
+        wait_for(&pipeline, &mut notices, |_, notices| notices.len() == 2);
+        notices.pop();
 
         pipeline.set_paused(true);
         assert!(pipeline.is_paused());

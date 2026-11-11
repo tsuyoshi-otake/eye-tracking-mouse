@@ -172,8 +172,13 @@ unsafe extern "system" fn report(hwnd: HWND, message: u32, wparam: WPARAM, lpara
     };
     let first = EVENTS.with(|events| {
         let mut events = events.borrow_mut();
-        events.push_back(event);
-        events.len() == 1
+        // A request to paint and a timer that is due say nothing new the second time, and they are
+        // said again and again while nobody takes the notes (for as long as a menu is open, for one).
+        let said = matches!(event, Event::Paint(_) | Event::Timer(..)) && events.contains(&event);
+        if !said {
+            events.push_back(event);
+        }
+        !said && events.len() == 1
     });
     if first {
         // A message sent straight to the window does not end the loop's wait for the next one; this does.
@@ -307,4 +312,47 @@ pub fn client_size(window: Window) -> (i32, i32) {
     let mut rect = RECT::default();
     let _ = unsafe { GetClientRect(window, &mut rect) };
     (rect.right - rect.left, rect.bottom - rect.top)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    #[test]
+    fn a_reporting_window_notes_what_happens_in_order_and_a_reminder_only_once() {
+        const CLASS: &str = "EtmWindowTest";
+        register_reporting_class(CLASS).unwrap();
+        let window = open(CLASS, "window test", Kind::Hidden, RectI::default()).unwrap();
+        // Sent, not posted: the way the system calls the procedure in the middle of something else.
+        let send = |message: u32, wparam: usize| {
+            unsafe { SendMessageW(window, message, Some(WPARAM(wparam)), Some(LPARAM(7))) };
+        };
+        send(WM_TIMER, 1);
+        send(APP_MESSAGE + 5, 3);
+        send(WM_TIMER, 1);
+        send(WM_TIMER, 2);
+        send(WM_KEYDOWN, KEY_ESCAPE as usize);
+        send(WM_KEYDOWN, KEY_ESCAPE as usize);
+        send(WM_CLOSE, 0);
+        let expected = [
+            Event::Timer(window, 1),
+            Event::Message { window, message: APP_MESSAGE + 5, wparam: 3, lparam: 7 },
+            Event::Timer(window, 2),
+            Event::KeyDown(window, KEY_ESCAPE),
+            Event::KeyDown(window, KEY_ESCAPE),
+            Event::Close(window),
+        ];
+        for event in expected {
+            assert_eq!(next_event(), Some(event));
+        }
+        // Once a reminder was heard, the next one is noted again.
+        send(WM_TIMER, 1);
+        assert_eq!(next_event(), Some(Event::Timer(window, 1)));
+
+        // A request to close leaves the window standing: whether it goes is for its owner to say.
+        assert_eq!(find(CLASS), Some(window));
+        destroy(window);
+        assert_eq!(find(CLASS), None);
+    }
 }

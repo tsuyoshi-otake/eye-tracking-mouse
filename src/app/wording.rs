@@ -53,6 +53,9 @@ pub fn could_not_start(reason: &str) -> Message {
 /// The menu of the icon. What follows the tab is shown at the right edge, as the key to press instead.
 pub const MENU_PAUSE: &str = "一時停止\tCtrl+Alt+P";
 pub const MENU_RESUME: &str = "再開\tCtrl+Alt+P";
+pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
+pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
+pub const MENU_PREVIEW: &str = "カメラのプレビュー";
 pub const MENU_SETTINGS: &str = "設定ファイルを開く（再起動で反映）";
 pub const MENU_QUIT: &str = "終了\tCtrl+Alt+Q";
 
@@ -96,10 +99,32 @@ pub fn trouble(status: &Status) -> Option<Message> {
     }
 }
 
+const RETRY: &str = "Ctrl+Alt+C でやり直せます。";
+
+/// Shown when a calibration run ended without a result.
+pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
+    let text = match problem {
+        CalibrationProblem::Routine(Failure::FaceLost) => "顔がカメラに映っていませんでした。".to_string(),
+        CalibrationProblem::Routine(Failure::TooSlow) => {
+            "目を開けた顔を十分に測れませんでした。部屋の明るさとカメラの向きを確認してください。".to_string()
+        }
+        CalibrationProblem::Routine(Failure::HeadNotMoved) => {
+            "最後のステップで頭の動きが足りませんでした。中央の点を見たまま、頭を上下左右にゆっくり回します。".to_string()
+        }
+        CalibrationProblem::Routine(Failure::Unusable) => "測定結果から視線のモデルを作れませんでした。".to_string(),
+        CalibrationProblem::Routine(Failure::Inaccurate { error_px }) => {
+            format!("誤差が大きすぎました（約{error_px:.0}ピクセル）。頭は動かさず、目だけで点を追います。")
+        }
+        CalibrationProblem::Camera(reason) => format!("カメラを使えません。（{reason}）"),
+        CalibrationProblem::DisplayChanged => "途中で画面の構成が変わりました。".to_string(),
+        CalibrationProblem::Paused => "一時停止したため中止しました。".to_string(),
+    };
+    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RETRY}"), warning: true }
+}
+
 pub fn notice(notice: &Notice) -> Message {
-    const RETRY: &str = "Ctrl+Alt+C でやり直せます。";
     match notice {
-        Notice::CalibrationDone { error_px, saved: Ok(()) } => Message {
+        Notice::CalibrationDone { error_px, saved: Ok(()), .. } => Message {
             title: "キャリブレーション完了",
             text: format!("視線ジャンプが使えます（誤差の目安 約{error_px:.0}ピクセル）。"),
             warning: false,
@@ -109,25 +134,7 @@ pub fn notice(notice: &Notice) -> Message {
             text: format!("終了するまでは使えますが、次回の起動時にはやり直しが必要です。（{reason}）"),
             warning: true,
         },
-        Notice::CalibrationFailed(problem) => {
-            let text = match problem {
-                CalibrationProblem::Routine(Failure::FaceLost) => "顔がカメラに映っていませんでした。".to_string(),
-                CalibrationProblem::Routine(Failure::TooSlow) => {
-                    "目を開けた顔を十分に測れませんでした。部屋の明るさとカメラの向きを確認してください。".to_string()
-                }
-                CalibrationProblem::Routine(Failure::HeadNotMoved) => {
-                    "最後のステップで頭の動きが足りませんでした。中央の点を見たまま、頭を上下左右にゆっくり回します。".to_string()
-                }
-                CalibrationProblem::Routine(Failure::Unusable) => "測定結果から視線のモデルを作れませんでした。".to_string(),
-                CalibrationProblem::Routine(Failure::Inaccurate { error_px }) => {
-                    format!("誤差が大きすぎました（約{error_px:.0}ピクセル）。頭は動かさず、目だけで点を追います。")
-                }
-                CalibrationProblem::Camera(reason) => format!("カメラを使えません。（{reason}）"),
-                CalibrationProblem::DisplayChanged => "途中で画面の構成が変わりました。".to_string(),
-                CalibrationProblem::Paused => "一時停止したため中止しました。".to_string(),
-            };
-            Message { title: "キャリブレーションできませんでした", text: format!("{text}{RETRY}"), warning: true }
-        }
+        Notice::CalibrationFailed { problem, .. } => calibration_failed(problem),
         Notice::GazeUnavailable(problem) => {
             let cause = match problem {
                 GazeProblem::ScreenChanged => "キャリブレーションした画面が見つかりません。",
@@ -156,6 +163,13 @@ pub fn instruction(phase: Phase) -> &'static str {
     }
 }
 
+/// Shown when one of the program's own windows cannot be opened.
+pub fn window_not_opened(reason: &str) -> Message {
+    Message { title: "画面を開けません", text: format!("もう一度お試しください。（{reason}）"), warning: true }
+}
+
+pub const CALIBRATION_TITLE: &str = "eye-tracking-mouse キャリブレーション";
+pub const PREVIEW_TITLE: &str = "eye-tracking-mouse プレビュー";
 pub const FACE_NOT_VISIBLE: &str = "顔がカメラに映っていません";
 pub const CALIBRATION_PREPARING: &str = "カメラを準備しています…";
 pub const CALIBRATION_HOW_TO_CANCEL: &str = "Esc または Ctrl+Alt+C で中止";
@@ -205,9 +219,10 @@ mod tests {
             CalibrationProblem::DisplayChanged,
             CalibrationProblem::Paused,
         ];
-        let mut notices: Vec<Notice> = problems.into_iter().map(Notice::CalibrationFailed).collect();
-        notices.push(Notice::CalibrationDone { error_px: 48.6, saved: Ok(()) });
-        notices.push(Notice::CalibrationDone { error_px: 48.6, saved: Err(reason()) });
+        let mut notices: Vec<Notice> =
+            problems.into_iter().map(|problem| Notice::CalibrationFailed { run: 1, problem }).collect();
+        notices.push(Notice::CalibrationDone { run: 1, error_px: 48.6, saved: Ok(()) });
+        notices.push(Notice::CalibrationDone { run: 1, error_px: 48.6, saved: Err(reason()) });
         notices.push(Notice::GazeUnavailable(GazeProblem::ScreenChanged));
         notices.push(Notice::GazeUnavailable(GazeProblem::CameraChanged));
         notices.push(Notice::CalibrationUnreadable(reason()));
@@ -223,6 +238,7 @@ mod tests {
         let many: Vec<String> = ('A'..='F').map(hotkey_taken).collect();
         fits(&startup_problems(&many));
         fits(&startup_problems(&many[..1]));
+        fits(&window_not_opened(&reason()));
     }
 
     #[test]
@@ -231,7 +247,7 @@ mod tests {
         for quiet in [Status::Starting, Status::Paused, Status::Calibrating, Status::Pointing(Activity::NoFace)] {
             assert_eq!(trouble(&quiet), None);
         }
-        assert!(notice(&Notice::CalibrationDone { error_px: 40.0, saved: Ok(()) }).text.contains("約40ピクセル"));
-        assert!(!notice(&Notice::CalibrationDone { error_px: 40.0, saved: Ok(()) }).warning);
+        let done = notice(&Notice::CalibrationDone { run: 1, error_px: 40.0, saved: Ok(()) });
+        assert!(done.text.contains("約40ピクセル") && !done.warning);
     }
 }
