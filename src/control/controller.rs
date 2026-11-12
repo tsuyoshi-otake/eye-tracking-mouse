@@ -52,7 +52,7 @@ impl Default for Tuning {
             blink_click: true,
             head_gain: HeadGain { slow: 700.0, fast: 2200.0 },
             jump_distance: 250.0,
-            blink: BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.7 },
+            blink: BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.6 },
         }
     }
 }

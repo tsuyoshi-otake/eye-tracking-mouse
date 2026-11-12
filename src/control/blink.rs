@@ -15,7 +15,9 @@
 //! the thresholds fit small and large eyes alike. A wink (one eye) does nothing.
 
 /// Seconds for the open-size estimate to follow an eye that opens wider, and one that narrows.
-const BASELINE_RISE: f32 = 0.3;
+/// Slow both ways, so the estimate is the eye's usual size and not the widest it has just been:
+/// measured on a person, an eye wanders between 0.6 and 1.0 of its widest while plainly open.
+const BASELINE_RISE: f32 = 1.5;
 const BASELINE_FALL: f32 = 3.0;
 /// The open-size estimate never goes below this, so noise on a shut eye cannot count as "open".
 const BASELINE_FLOOR: f32 = 0.1;
@@ -96,9 +98,10 @@ impl BlinkClicker {
         };
         self.state = next;
 
-        // Learn the open size only from eyes that are plainly open.
+        // Learn the open size whenever the eyes are not in a blink, also from an eye that has
+        // become narrower than it was: otherwise it could never count as open again.
         let mut learned = baseline;
-        if next == State::Open && open {
+        if next == State::Open {
             let dt = (time - last_update).clamp(0.0, 0.2) as f32;
             for eye in 0..2 {
                 let seconds = if openness[eye] > learned[eye] { BASELINE_RISE } else { BASELINE_FALL };
@@ -114,7 +117,7 @@ impl BlinkClicker {
 mod tests {
     use super::*;
 
-    const SETTINGS: BlinkSettings = BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.7 };
+    const SETTINGS: BlinkSettings = BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.6 };
     const OPEN: [f32; 2] = [0.30, 0.28];
     const SHUT: [f32; 2] = [0.06, 0.05];
 
@@ -205,11 +208,25 @@ mod tests {
     #[test]
     fn half_open_eyes_between_the_thresholds_keep_the_current_state() {
         let mut rig = Rig::new();
-        // Shut, then only half reopened (60 %): still counted as shut, so the click arms.
-        rig.feed(0.2, Some(SHUT)).feed(0.3, Some([0.18, 0.17]));
+        // Shut, then only half reopened (55 %): still counted as shut, so the click arms.
+        rig.feed(0.2, Some(SHUT)).feed(0.3, Some([0.165, 0.155]));
         assert_eq!(rig.events, [BlinkEvent::Armed]);
         rig.feed(0.1, Some(OPEN));
         assert_eq!(rig.events, [BlinkEvent::Armed, BlinkEvent::Click]);
+    }
+
+    /// Measured on a person with `--diag`: the eyes rest at 0.27 and 0.20 of their widths, open
+    /// to 0.29 and 0.23 now and then, drop to 0.05 and 0.03 when shut, and one of them comes
+    /// back only to 0.15 for a second or more after a long blink.
+    #[test]
+    fn an_eye_that_reopens_narrower_than_its_widest_still_clicks() {
+        let mut rig = Rig { clicker: BlinkClicker::default(), frame: 0, events: Vec::new() };
+        rig.feed(2.0, Some([0.27, 0.20])).feed(0.5, Some([0.29, 0.23])).feed(1.0, Some([0.27, 0.20]));
+        rig.feed(0.6, Some([0.05, 0.03])).feed(0.3, Some([0.26, 0.15]));
+        assert_eq!(rig.events, [BlinkEvent::Armed, BlinkEvent::Click]);
+        // And when the eye stays that narrow, the next long blink clicks as well.
+        rig.feed(4.0, Some([0.26, 0.15])).feed(0.6, Some([0.05, 0.03])).feed(0.3, Some([0.26, 0.15]));
+        assert_eq!(rig.events[2..], [BlinkEvent::Armed, BlinkEvent::Click]);
     }
 
     #[test]

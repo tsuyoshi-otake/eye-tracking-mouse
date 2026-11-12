@@ -12,7 +12,7 @@ const MAX_CAMERA: usize = 31;
 /// A still-shut pair of eyes cancels the click at least this many seconds after it was armed.
 const LIMIT_MARGIN: f32 = 0.3;
 /// An eye counts as open again this far above the "shut" share of its open size.
-const OPEN_MARGIN: f32 = 0.2;
+const OPEN_MARGIN: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -105,7 +105,7 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
         tuning.blink.limit = shortest;
         warnings.push(format!("blink_limit が短すぎるので {shortest} 秒にしました（blink_hold + {LIMIT_MARGIN} 秒以上）"));
     }
-    tuning.blink.open_ratio = (tuning.blink.closed_ratio + OPEN_MARGIN).min(0.95);
+    tuning.blink.open_ratio = tuning.blink.closed_ratio + OPEN_MARGIN;
     (settings, warnings)
 }
 
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!((tuning.head_gain.slow, tuning.head_gain.fast), (400.0, 1500.5));
         assert_eq!(tuning.jump_distance, 300.0);
         assert_eq!((tuning.blink.hold, tuning.blink.limit, tuning.blink.closed_ratio), (0.6, 2.0, 0.4));
-        assert!((tuning.blink.open_ratio - 0.6).abs() < 1e-6, "the open share follows the shut share");
+        assert!((tuning.blink.open_ratio - 0.5).abs() < 1e-6, "the open share follows the shut share");
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(settings.tuning.jump_distance, 5000.0);
         assert_eq!(settings.tuning.blink.hold, 0.15);
         assert_eq!(settings.tuning.blink.closed_ratio, 0.8);
-        assert_eq!(settings.tuning.blink.open_ratio, 0.95, "never above the eye's full size");
+        assert!((settings.tuning.blink.open_ratio - 0.9).abs() < 1e-6, "below the eye's full size at the largest shut share");
         assert_eq!(settings.tuning.head_gain.fast, Settings::default().tuning.head_gain.fast, "infinity is not a number");
     }
 

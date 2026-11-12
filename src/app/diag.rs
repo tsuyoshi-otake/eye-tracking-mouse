@@ -18,12 +18,19 @@ use super::face;
 /// Frames averaged into the reference face shape.
 const REFERENCE_FRAMES: usize = 20;
 
-#[derive(Default)]
 struct Second {
     frames: u32,
     faces: u32,
     track_seconds: f64,
     last: Option<(f32, vision::FaceMeasurement)>,
+    /// Smallest and largest lid gap of each eye in this second: a blink shows as a small minimum.
+    open_range: [(f32, f32); 2],
+}
+
+impl Default for Second {
+    fn default() -> Self {
+        Second { frames: 0, faces: 0, track_seconds: 0.0, last: None, open_range: [(f32::INFINITY, 0.0); 2] }
+    }
 }
 
 pub fn run(request: &CameraRequest, seconds: u32) -> Result<()> {
@@ -52,7 +59,16 @@ pub fn run(request: &CameraRequest, seconds: u32) -> Result<()> {
             second.faces += 1;
             total_faces += 1;
             match &reference {
-                Some(shape) => second.last = vision::measure(shape, &mesh).map(|m| (mesh.presence, m)).or(second.last),
+                Some(shape) => {
+                    let measured = vision::measure(shape, &mesh);
+                    if let Some(m) = &measured {
+                        for eye in 0..2 {
+                            second.open_range[eye].0 = second.open_range[eye].0.min(m.eyes.openness[eye]);
+                            second.open_range[eye].1 = second.open_range[eye].1.max(m.eyes.openness[eye]);
+                        }
+                    }
+                    second.last = measured.map(|m| (mesh.presence, m)).or(second.last);
+                }
                 None => {
                     builder.add(&mesh.points);
                     if builder.frames() >= REFERENCE_FRAMES {
@@ -88,7 +104,7 @@ fn report(at: f64, second: &Second) {
     print!("t={at:>2.0}s frames={:>2} faces={:>2} track={per_frame:.1}ms", second.frames, second.faces);
     match &second.last {
         Some((presence, m)) => println!(
-            " presence={presence:.2} yaw={:+.1} pitch={:+.1} roll={:+.1} deg span={:.0}px iris=({:+.3},{:+.3}) lid={:+.3} open=({:.2},{:.2})",
+            " presence={presence:.2} yaw={:+.1} pitch={:+.1} roll={:+.1} deg span={:.0}px iris=({:+.3},{:+.3}) lid={:+.3} open=({:.2},{:.2}) open range=({:.2}..{:.2}, {:.2}..{:.2})",
             m.pose.yaw.to_degrees(),
             m.pose.pitch.to_degrees(),
             m.pose.roll.to_degrees(),
@@ -98,6 +114,10 @@ fn report(at: f64, second: &Second) {
             m.eyes.lid,
             m.eyes.openness[0],
             m.eyes.openness[1],
+            second.open_range[0].0,
+            second.open_range[0].1,
+            second.open_range[1].0,
+            second.open_range[1].1,
         ),
         None => println!(" (no measurement yet)"),
     }

@@ -4,12 +4,14 @@
 //! outputs. `run` is synchronous and executes on the CPU, so results do not
 //! depend on the graphics driver. What the tensors mean is the caller's business.
 
+use std::ffi::c_void;
+
 use windows::AI::MachineLearning::{
     LearningModel, LearningModelBinding, LearningModelDevice, LearningModelDeviceKind,
-    LearningModelSession, TensorFloat,
+    LearningModelSession, LearningModelSessionOptions, TensorFloat,
 };
 use windows::Storage::Streams::{DataWriter, IBuffer, InMemoryRandomAccessStream, RandomAccessStreamReference};
-use windows::core::{HSTRING, Interface};
+use windows::core::{GUID, HRESULT, HSTRING, IUnknown, Interface};
 
 use crate::error::{Context, Error, Result};
 
@@ -18,6 +20,43 @@ pub(super) fn buffer_from_bytes(bytes: &[u8]) -> Result<IBuffer> {
     let writer = DataWriter::new()?;
     writer.WriteBytes(bytes)?;
     Ok(writer.DetachBuffer()?)
+}
+
+/// `ILearningModelSessionOptionsNative::SetIntraOpNumThreadsOverride(UINT32)` and
+/// `ILearningModelSessionOptionsNative1::SetIntraOpThreadSpinning(boolean)` of
+/// windows.ai.machinelearning.native.h. The `windows` crate does not carry them.
+const OPTIONS_NATIVE: GUID = GUID::from_u128(0xc71e953f_37b4_4564_8658_d8396866db0d);
+const OPTIONS_NATIVE_1: GUID = GUID::from_u128(0x5da37a26_0526_414b_91e4_2a0fa3ddba40);
+
+/// Keeps the runtime from occupying the processor between frames.
+///
+/// By default it starts one worker per core and lets each of them spin while it
+/// waits for work: measured with the camera loop at 30 frames per second, seven
+/// workers burned half a core each for a graph that needs a few milliseconds.
+/// One thread without spinning is enough. A Windows that does not know these
+/// options keeps its default; that costs processor time, not correctness.
+fn calm_threads(options: &LearningModelSessionOptions) {
+    set_native(options, &OPTIONS_NATIVE_1, 0u8);
+    set_native(options, &OPTIONS_NATIVE, 1u32);
+}
+
+/// Calls the one method of a native options interface, if this Windows has it.
+fn set_native<T: Copy>(options: &LearningModelSessionOptions, interface: &GUID, value: T) {
+    type Method<T> = unsafe extern "system" fn(*mut c_void, T) -> HRESULT;
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: QueryInterface either fails or hands out one owned reference in `raw`.
+    if unsafe { options.query(interface, &mut raw) }.is_err() || raw.is_null() {
+        return;
+    }
+    // SAFETY: `raw` is that reference; `native` releases it when dropped.
+    let native = unsafe { IUnknown::from_raw(raw) };
+    // SAFETY: both interfaces derive from IUnknown and declare exactly one method, so it is
+    // the fourth entry of the table, and `T` is the type the header gives its argument.
+    unsafe {
+        let table = *(raw as *const *const *const c_void);
+        let method: Method<T> = std::mem::transmute_copy(&*table.add(3));
+        let _ = method(native.as_raw(), value);
+    }
 }
 
 pub struct Network {
@@ -37,8 +76,10 @@ impl Network {
         let reference = RandomAccessStreamReference::CreateFromStream(&stream)?;
         let model = LearningModel::LoadFromStream(&reference).context("load the ONNX model")?;
         let device = LearningModelDevice::Create(LearningModelDeviceKind::Cpu).context("select the CPU for inference")?;
-        let session =
-            LearningModelSession::CreateFromModelOnDevice(&model, &device).context("create the inference session")?;
+        let options = LearningModelSessionOptions::new().context("create the session options")?;
+        calm_threads(&options);
+        let session = LearningModelSession::CreateFromModelOnDeviceWithSessionOptions(&model, &device, &options)
+            .context("create the inference session")?;
         Ok(Network {
             session,
             input_name: HSTRING::from(input.0),
