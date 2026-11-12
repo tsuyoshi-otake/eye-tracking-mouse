@@ -1,0 +1,40 @@
+[package]
+name = "eye-tracking-mouse"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Camera-driven mouse for Windows: gaze jump, head fine-tuning, blink click"
+publish = false
+
+# The only direct dependency is Microsoft's official Windows API binding.
+# No GUI, imaging, or ML framework: capture is Media Foundation, inference is
+# the in-box Windows ML, input injection is SendInput, drawing is GDI.
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "AI_MachineLearning",
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_FaceAnalysis",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Speech",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.dev]
+# Per-pixel loops (cropping, drawing) are unusably slow at opt-level 0.
+opt-level = 1
+
+[profile.release]
+lto = "thin"

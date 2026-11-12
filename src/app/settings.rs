@@ -1,0 +1,251 @@
+//! What the person can adjust, read once at startup from a small text file.
+//!
+//! Contract: `parse` never fails. A line it cannot use is reported as a
+//! warning and that setting keeps its default; a number outside its range is
+//! pulled to the nearest allowed value, also with a warning. Warnings are
+//! shown to the person, so they are written in Japanese like the file itself.
+
+use crate::control::controller::Tuning;
+
+/// The highest camera index accepted (a position in `--list-cameras`).
+const MAX_CAMERA: usize = 31;
+/// A still-shut pair of eyes cancels the click at least this many seconds after it was armed.
+const LIMIT_MARGIN: f32 = 0.3;
+/// An eye counts as open again this far above the "shut" share of its open size.
+const OPEN_MARGIN: f32 = 0.1;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Settings {
+    /// Position of the camera in `Camera::device_names()`.
+    pub camera: usize,
+    pub tuning: Tuning,
+}
+
+/// One setting's place in `Settings`, with the values it accepts.
+enum Slot<'a> {
+    Camera(&'a mut usize),
+    Switch(&'a mut bool),
+    Number(&'a mut f32, f32, f32),
+}
+
+fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
+    let tuning = &mut settings.tuning;
+    Some(match name {
+        "camera" => Slot::Camera(&mut settings.camera),
+        "gaze_jump" => Slot::Switch(&mut tuning.gaze_jump),
+        "blink_click" => Slot::Switch(&mut tuning.blink_click),
+        "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, 50.0, 5000.0),
+        "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
+        "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
+        "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
+        "blink_hold" => Slot::Number(&mut tuning.blink.hold, 0.15, 3.0),
+        "blink_limit" => Slot::Number(&mut tuning.blink.limit, 0.45, 10.0),
+        "blink_closed" => Slot::Number(&mut tuning.blink.closed_ratio, 0.2, 0.8),
+        _ => return None,
+    })
+}
+
+fn switch(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Reads the settings file's text. Returns the settings and what was wrong with the text.
+pub fn parse(text: &str) -> (Settings, Vec<String>) {
+    let mut settings = Settings::default();
+    let mut warnings = Vec::new();
+    // Some editors put a byte-order mark in front of the first line.
+    for (index, raw) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let place = format!("{}行目", index + 1);
+        let Some((name, value)) = line.split_once('=') else {
+            warnings.push(format!("{place}: 「{line}」は「名前 = 値」の形ではありません"));
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        match slot(&mut settings, name) {
+            None => warnings.push(format!("{place}: 「{name}」という設定はありません")),
+            Some(Slot::Switch(target)) => match switch(value) {
+                Some(on) => *target = on,
+                None => warnings.push(format!("{place}: {name} は on か off で指定してください")),
+            },
+            Some(Slot::Number(target, low, high)) => match value.parse::<f32>() {
+                Ok(number) if number.is_finite() => {
+                    *target = number.clamp(low, high);
+                    if *target != number {
+                        warnings.push(format!("{place}: {name} は {low}〜{high} の範囲なので {} にしました", *target));
+                    }
+                }
+                _ => warnings.push(format!("{place}: {name} の値「{value}」は数値ではありません")),
+            },
+            Some(Slot::Camera(target)) => match value.parse::<usize>() {
+                Ok(index) => {
+                    *target = index.min(MAX_CAMERA);
+                    if index > MAX_CAMERA {
+                        warnings.push(format!("{place}: {name} は 0〜{MAX_CAMERA} の範囲なので {MAX_CAMERA} にしました"));
+                    }
+                }
+                Err(_) => warnings.push(format!("{place}: {name} の値「{value}」は 0 以上の整数ではありません")),
+            },
+        }
+    }
+    // Rules that tie two settings together hold whatever order the lines came in.
+    let tuning = &mut settings.tuning;
+    if tuning.head_gain.fast < tuning.head_gain.slow {
+        tuning.head_gain.fast = tuning.head_gain.slow;
+        warnings.push("head_speed_fast が head_speed_slow より小さいので、同じ値にしました".to_string());
+    }
+    let shortest = tuning.blink.hold + LIMIT_MARGIN;
+    if tuning.blink.limit < shortest {
+        tuning.blink.limit = shortest;
+        warnings.push(format!("blink_limit が短すぎるので {shortest} 秒にしました（blink_hold + {LIMIT_MARGIN} 秒以上）"));
+    }
+    tuning.blink.open_ratio = tuning.blink.closed_ratio + OPEN_MARGIN;
+    (settings, warnings)
+}
+
+/// The file written when there is none yet: every setting at its default, explained.
+pub fn template() -> String {
+    let Settings { camera, tuning } = Settings::default();
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    format!(
+        "\
+# eye-tracking-mouse の設定
+# 「名前 = 値」を1行に1つ書きます。# から行末まではコメントです。
+# 変更は、アプリを終了して起動し直すと反映されます。
+
+# 使うカメラの番号（eye-tracking-mouse --list-cameras で確認できます）
+camera = {camera}
+
+# 視線ジャンプ（見た場所へカーソルが飛ぶ）: on / off
+gaze_jump = {gaze_jump}
+
+# 長いまばたきで左クリック: on / off
+blink_click = {blink_click}
+
+# 頭の動きに対するカーソルの速さ（大きいほど速い）
+# ゆっくり動かしたとき（50〜5000）
+head_speed_slow = {slow}
+# すばやく動かしたとき（head_speed_slow 以上、20000 まで）
+head_speed_fast = {fast}
+# カーソルの安定度（0.5〜8、大きいほど止まっているときに震えず、動き出しは少し遅くなる）
+head_steadiness = {steadiness}
+
+# 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
+# これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
+jump_distance = {jump}
+
+# クリックになるまで目を閉じておく時間（秒、0.15〜3.0）
+blink_hold = {hold}
+# 閉じたままこの時間を過ぎるとクリックを取り消します（秒、blink_hold + {LIMIT_MARGIN} 以上、10 まで）
+blink_limit = {limit}
+# 目を「閉じた」とみなす開き具合（ふだんの開きに対する割合、0.2〜0.8）
+blink_closed = {closed}
+",
+        gaze_jump = on_off(tuning.gaze_jump),
+        blink_click = on_off(tuning.blink_click),
+        slow = tuning.head_gain.slow,
+        fast = tuning.head_gain.fast,
+        steadiness = tuning.head_gain.steadiness,
+        jump = tuning.jump_distance,
+        hold = tuning.blink.hold,
+        limit = tuning.blink.limit,
+        closed = tuning.blink.closed_ratio,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_template_reads_back_as_the_defaults_without_complaint() {
+        let (settings, warnings) = parse(&template());
+        assert_eq!(settings, Settings::default());
+        assert_eq!(warnings, Vec::<String>::new());
+        // Every setting is offered in the template.
+        let names = ["camera", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "jump_distance"];
+        for name in names.into_iter().chain(["blink_hold", "blink_limit", "blink_closed"]) {
+            assert!(slot(&mut Settings::default(), name).is_some(), "{name}");
+            assert!(template().contains(&format!("\n{name} = ")), "{name}");
+        }
+    }
+
+    #[test]
+    fn values_are_read_past_comments_spacing_and_a_byte_order_mark() {
+        let text = "\u{feff}camera=2 # the second camera\r\n\r\n  gaze_jump = OFF\nblink_click = no\nhead_speed_slow = 400\n\
+                    head_speed_fast=1500.5\njump_distance = 300\nblink_hold = 0.6\nblink_limit = 2\nblink_closed = 0.4\n";
+        let (settings, warnings) = parse(text);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(settings.camera, 2);
+        let tuning = settings.tuning;
+        assert!(!tuning.gaze_jump && !tuning.blink_click);
+        assert_eq!((tuning.head_gain.slow, tuning.head_gain.fast), (400.0, 1500.5));
+        assert_eq!(tuning.jump_distance, 300.0);
+        assert_eq!((tuning.blink.hold, tuning.blink.limit, tuning.blink.closed_ratio), (0.6, 2.0, 0.4));
+        assert!((tuning.blink.open_ratio - 0.5).abs() < 1e-6, "the open share follows the shut share");
+    }
+
+    #[test]
+    fn an_empty_file_means_the_defaults() {
+        assert_eq!(parse(""), (Settings::default(), Vec::new()));
+        assert_eq!(parse("# nothing but a comment\n\n"), (Settings::default(), Vec::new()));
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_used_is_reported_and_leaves_the_default() {
+        let defaults = Settings::default();
+        for (text, mentions) in [
+            ("head_speed_slow = fast", "head_speed_slow"),
+            ("head_speed_slow = NaN", "head_speed_slow"),
+            ("gaze_jump = maybe", "gaze_jump"),
+            ("camera = -1", "camera"),
+            ("camera = 1.5", "camera"),
+            ("mouse_speed = 3", "mouse_speed"),
+            ("just some words", "just some words"),
+        ] {
+            let (settings, warnings) = parse(&format!("blink_hold = 0.5\n{text}\n"));
+            assert_eq!(warnings.len(), 1, "{text}: {warnings:?}");
+            assert!(warnings[0].starts_with("2行目") && warnings[0].contains(mentions), "{}", warnings[0]);
+            assert_eq!(settings.camera, defaults.camera, "{text}");
+            assert_eq!(settings.tuning.head_gain, defaults.tuning.head_gain, "{text}");
+            assert_eq!(settings.tuning.gaze_jump, defaults.tuning.gaze_jump, "{text}");
+            assert_eq!(settings.tuning.blink.hold, 0.5, "the usable line still counts");
+        }
+    }
+
+    #[test]
+    fn numbers_outside_their_range_are_pulled_in_and_reported() {
+        let (settings, warnings) = parse(
+            "camera = 99\nhead_speed_slow = 1\njump_distance = 1e9\nblink_hold = 0\nblink_closed = 0.95\nhead_speed_fast = inf\n",
+        );
+        assert_eq!(warnings.len(), 6, "{warnings:?}");
+        assert_eq!(settings.camera, 31);
+        assert_eq!(settings.tuning.head_gain.slow, 50.0);
+        assert_eq!(settings.tuning.jump_distance, 5000.0);
+        assert_eq!(settings.tuning.blink.hold, 0.15);
+        assert_eq!(settings.tuning.blink.closed_ratio, 0.8);
+        assert!((settings.tuning.blink.open_ratio - 0.9).abs() < 1e-6, "below the eye's full size at the largest shut share");
+        assert_eq!(settings.tuning.head_gain.fast, Settings::default().tuning.head_gain.fast, "infinity is not a number");
+    }
+
+    #[test]
+    fn settings_that_depend_on_each_other_are_made_consistent_in_either_order() {
+        for text in ["head_speed_fast = 300\nhead_speed_slow = 900\n", "head_speed_slow = 900\nhead_speed_fast = 300\n"] {
+            let (settings, warnings) = parse(text);
+            assert_eq!((settings.tuning.head_gain.slow, settings.tuning.head_gain.fast), (900.0, 900.0));
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+        }
+        for text in ["blink_limit = 1\nblink_hold = 2\n", "blink_hold = 2\nblink_limit = 1\n"] {
+            let (settings, warnings) = parse(text);
+            assert_eq!((settings.tuning.blink.hold, settings.tuning.blink.limit), (2.0, 2.3));
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+        }
+    }
+}

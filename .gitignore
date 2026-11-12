@@ -1,3 +1,4 @@
 /target
+/installer/out
 *.log
 /.claude/goal-loop/
