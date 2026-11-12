@@ -47,9 +47,11 @@ is doing.
 | What you do | What happens |
 |---|---|
 | Turn or shift your head a little | The cursor moves. A quick movement travels farther than a slow one. |
-| Close both eyes for about 0.4 s, until the short high beep, then open them | Left click where the cursor was when the eyes closed. |
-| Keep the eyes closed for more than 1.5 s | The click is dropped (lower beep). |
-| Look far down, so that the eyes narrow as if shut | One high and one lower beep, no click; the cursor moves again about 3 s later. Blink clicks do not work while looking that far down. |
+| Close both eyes for about 0.4 s, until the voice says "どうぞ", then open them | Left click where the cursor was when the eyes closed; the voice says "クリックしました". |
+| Keep the eyes closed for more than 1.5 s | The click is dropped; the voice says "取り消しました". |
+| Look far down, so that the eyes narrow as if shut | "どうぞ" and then "取り消しました", no click; the cursor moves again about 3 s later. Blink clicks do not work while looking that far down. |
+
+The phrases are spoken by the Japanese voice that ships with Windows; without one, three tones (high, higher, low) stand in for them.
 | Rest your gaze on a place far from the cursor (after calibration) | The cursor jumps there. |
 | Move the real mouse | The program lets go at once and takes over again 1.5 s after you stop. |
 

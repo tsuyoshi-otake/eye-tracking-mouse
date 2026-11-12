@@ -74,6 +74,8 @@ pub struct Frame<'a> {
 pub enum Sound {
     /// The eyes have been shut long enough: opening them now clicks.
     Armed,
+    /// The click was made.
+    Clicked,
     /// The pending click was abandoned.
     Cancelled,
 }
@@ -120,7 +122,8 @@ fn sound_for(event: Option<BlinkEvent>) -> Option<Sound> {
     match event {
         Some(BlinkEvent::Armed) => Some(Sound::Armed),
         Some(BlinkEvent::Cancelled) => Some(Sound::Cancelled),
-        Some(BlinkEvent::Click) | None => None,
+        Some(BlinkEvent::Click) => Some(Sound::Clicked),
+        None => None,
     }
 }
 
@@ -340,6 +343,7 @@ mod tests {
         desk.rest(1, 0.012, OPEN);
         assert_eq!(desk.clicks, [(1280, 540)]);
         assert_eq!(desk.at(), (1280, 540));
+        assert_eq!(desk.sounds, [Sound::Armed, Sound::Clicked], "the click is announced");
         // The head settles back; that is not a pointing movement.
         desk.turn(5, 0.012, 0.0, OPEN);
         assert_eq!(desk.at(), (1280, 540));

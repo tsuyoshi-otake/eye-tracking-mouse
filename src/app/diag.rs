@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::image::BgraFrame;
 use crate::platform::camera::{Camera, CameraRequest};
 use crate::platform::face_detector::FaceDetector;
-use crate::platform::sound::Beeper;
+use crate::platform::sound::{Announcer, Cue};
 use crate::vision;
 use crate::vision::landmarks::FaceMesh;
 use crate::vision::pose::{ReferenceBuilder, ReferenceShape};
@@ -51,7 +51,7 @@ pub fn run(request: &CameraRequest, seconds: u32) -> Result<()> {
     let mut second = Second::default();
     let mut clicker = BlinkClicker::default();
     let blink = Tuning::default().blink;
-    let beeper = Beeper::new();
+    let announcer = Announcer::new();
     let mut total_faces = 0u32;
     let started = Instant::now();
     let mut next_report = 1.0;
@@ -94,9 +94,9 @@ pub fn run(request: &CameraRequest, seconds: u32) -> Result<()> {
             let was_closed = clicker.is_closed();
             let event = clicker.step(time, openness, &blink);
             match event {
-                Some(BlinkEvent::Armed) => beeper.play(880, 60),
-                Some(BlinkEvent::Click) => beeper.play(1320, 60),
-                Some(BlinkEvent::Cancelled) => beeper.play(440, 90),
+                Some(BlinkEvent::Armed) => announcer.say(Cue::Armed),
+                Some(BlinkEvent::Click) => announcer.say(Cue::Clicked),
+                Some(BlinkEvent::Cancelled) => announcer.say(Cue::Cancelled),
                 None => {}
             }
             if was_closed || clicker.is_closed() || event.is_some() {

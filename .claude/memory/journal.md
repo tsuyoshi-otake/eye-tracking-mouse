@@ -73,3 +73,11 @@
 - Residual risk: a blink click cannot work while the person looks far down (the lids give no signal there); a click that does not depend on the lids is the person's decision. Whether a deliberate blink while looking straight ahead clicks for this person is still unconfirmed.
 - Learning: see `rules.md` "Control" (held pointer).
 
+## 2026-11-12 - Spoken feedback instead of tones (#1)
+
+- Symptom: the person could not tell the two tones apart ("two kinds of sound, but no click") and asked for speech such as "clicked".
+- Root cause: tones carry no meaning by themselves, and a click made no sound at all, so success and "armed, then dropped" sounded alike.
+- Fix: `platform/sound.rs` is now an `Announcer` with three cues said by the system's speech synthesis (SAPI `ISpVoice`, the first voice with `Language=411`): "どうぞ" when a click is armed, "クリックしました" after the click, "取り消しました" when it is dropped. A new cue cuts off the one being said. Without a Japanese voice the old tones stand in. The controller reports `Sound::Clicked`. New crate feature `Win32_Media_Speech`, no new dependency.
+- Verification: `cargo test voice -- --ignored` found the voice and said the three phrases (4 s); a long blink in the controller test yields `[Armed, Clicked]`; 156 unit tests, clippy clean, resident test against the release build, 0 processes before and after. Whether the person finds it clear is theirs to say.
+- Learning: the armed cue is said while the person waits with shut eyes and has about 1.1 s left to open them, so it must stay one word.
+

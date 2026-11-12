@@ -37,7 +37,7 @@ use crate::image::BgraFrame;
 use crate::platform::camera::{Camera, CameraRequest};
 use crate::platform::pointer::{self, Desktop};
 use crate::platform::runtime::{self, ComApartment};
-use crate::platform::sound::Beeper;
+use crate::platform::sound::{Announcer, Cue};
 use crate::vision::landmarks::FaceMesh;
 
 use super::backoff::Backoff;
@@ -55,8 +55,6 @@ const GAP_PAUSE: Duration = Duration::from_millis(10);
 /// Notices kept for an owner that is not looking; older ones are dropped.
 const MAX_NOTICES: usize = 16;
 /// Tones (hertz, milliseconds) for a click that is armed and one that was given up.
-const ARMED_TONE: (u32, u32) = (880, 60);
-const CANCELLED_TONE: (u32, u32) = (440, 90);
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
@@ -380,7 +378,7 @@ struct Worker<'a> {
     run: Option<u32>,
     /// What the owner was last told about the gaze.
     gaze_problem: Option<GazeProblem>,
-    beeper: Beeper,
+    announcer: Announcer,
     frame: BgraFrame,
     mesh: FaceMesh,
 }
@@ -407,7 +405,7 @@ impl<'a> Worker<'a> {
             pending_calibration: None,
             run: None,
             gaze_problem: None,
-            beeper: Beeper::new(),
+            announcer: Announcer::new(),
             frame: BgraFrame::default(),
             mesh: FaceMesh::default(),
         }
@@ -593,8 +591,9 @@ impl<'a> Worker<'a> {
     /// Carries out what the engine answered. True when the system refused the pointer action.
     fn act(&self, output: &Output) -> bool {
         match output.sound {
-            Some(Sound::Armed) => self.beeper.play(ARMED_TONE.0, ARMED_TONE.1),
-            Some(Sound::Cancelled) => self.beeper.play(CANCELLED_TONE.0, CANCELLED_TONE.1),
+            Some(Sound::Armed) => self.announcer.say(Cue::Armed),
+            Some(Sound::Clicked) => self.announcer.say(Cue::Clicked),
+            Some(Sound::Cancelled) => self.announcer.say(Cue::Cancelled),
             None => {}
         }
         let (Some(action), Some(desktop)) = (output.pointer, &self.desktop) else { return false };
