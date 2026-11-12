@@ -1,123 +1,103 @@
 # eye-tracking-mouse
 
-Camera-driven mouse for Windows. Look at a spot and the cursor jumps there, small
-head movements nudge it the rest of the way, and a deliberate long blink clicks.
+カメラでマウスを操作する Windows 用プログラムです。見た場所にカーソルがジャンプし、頭の小さな動きで微調整し、意識して長くまばたきするとクリックします。
 
-Native Rust on Win32: one executable, no GUI, imaging or ML framework. The only
-direct dependency is Microsoft's `windows` crate. Capture is Media Foundation,
-the face landmark model runs on the Windows ML that ships with Windows, input is
-`SendInput`, and drawing is GDI.
+Win32 上で動くネイティブ Rust で、実行ファイル1つだけ、GUI・画像処理・機械学習フレームワークは使いません。直接の依存は Microsoft の `windows` クレートのみです。キャプチャは Media Foundation、顔ランドマークモデルは Windows 標準の Windows ML 上で動かし、入力注入は `SendInput`、描画は GDI です。
 
-## Status
+## 状態
 
-Everything that can be checked without a person in front of the camera is checked
-automatically (see [Checks](#checks)). Not exercised yet: the live loop with a real
-face. Expect to adjust the speeds and the blink times in the settings file, and
-treat these as untested until you have tried them:
+カメラの前に人がいなくても確認できるものは、すべて自動で確認済みです([動作確認](#動作確認)参照)。まだ試せていないのは、実際の顔を使ったライブループです。設定ファイルの速度やまばたき時間は調整が必要になると思うので、次の項目は自分で試すまでは未検証として扱ってください。
 
-- a calibration run from start to finish, and cancelling one that is under way
-- pausing in the middle of a calibration run
-- the preview with real camera pictures
-- how pointing and clicking feel
+- キャリブレーションの最初から最後までの実行、および実行中のキャンセル
+- キャリブレーション実行中の一時停止
+- 実際のカメラ映像でのプレビュー
+- ポインティングとクリックの操作感
 
-## Requirements
+## 動作環境
 
-- Windows 11, x64. Developed and tested on build 26300. An older Windows whose
-  built-in Windows ML cannot load an ONNX opset 13 model will not work;
-  `--selftest model` tells.
-- A USB camera that delivers 1280x720.
-- Rust 1.85 or newer with the MSVC toolchain, to build.
+- Windows 11、x64。build 26300 で開発・テストしています。内蔵の Windows ML が ONNX opset 13 のモデルを読み込めない古い Windows では動きません。`--selftest model` で確認できます。
+- 1280x720 で映像を出力できる USB カメラ。
+- ビルドには MSVC ツールチェーンの Rust 1.85 以降。
 
-## Build
+## ビルド
 
 ```
 cargo build --release
 ```
 
-The program is `target\release\eye-tracking-mouse.exe`. The model is embedded in it;
-nothing else needs to be installed or copied.
+生成物は `target\release\eye-tracking-mouse.exe` です。モデルは exe に埋め込まれているため、他にインストールやコピーが必要なものはありません。
 
-## Run
+## インストール
 
-Start `eye-tracking-mouse.exe`. It has no window: an eye-shaped icon appears in the
-notification area (look under the `^` if it is not visible) and a notification
-says that it has started. The icon's colour and its tooltip show what the program
-is doing.
+```
+pwsh -File scripts\build-installer.ps1
+```
 
-| What you do | What happens |
+で Inno Setup 6.6 以降を使って `installer\setup.iss` をコンパイルし、`installer\out\eye-tracking-mouse-v<version>-setup.exe` を作ります。先にリリースビルドを済ませてください。インストールはユーザー単位で、昇格なしに `%LOCALAPPDATA%\Programs` へ入り、スタートメニューに登録されます。アンインストールはプログラムファイルとショートカットを削除し、`%APPDATA%\eye-tracking-mouse`(設定・キャリブレーション・ログ)はそのまま残します。
+
+## 起動
+
+`eye-tracking-mouse.exe` を起動します。ウィンドウは表示されず、通知領域に目の形のアイコンが出ます(見えないときは `^` の中を確認してください)。開始したことは通知で知らせます。アイコンの色とツールチップに、プログラムの状態が表示されます。
+
+| 操作 | 結果 |
 |---|---|
-| Turn or shift your head a little | The cursor moves. A quick movement travels farther than a slow one. |
-| Close both eyes for about 0.4 s, until the voice says "どうぞ", then open them | Left click where the cursor was when the eyes closed; the voice says "クリックしました". |
-| Keep the eyes closed for more than 1.5 s | The click is dropped; the voice says "取り消しました". |
-| Look far down, so that the eyes narrow as if shut | "どうぞ" and then "取り消しました", no click; the cursor moves again about 3 s later. Blink clicks do not work while looking that far down. |
+| 頭を少し回したりずらしたりする | カーソルが動きます。速い動きほど大きく動きます。 |
+| 両目を0.4秒ほど閉じて「どうぞ」と言われたら開く | 目を閉じた時点のカーソル位置で左クリック。「クリックしました」と言います。 |
+| 目を閉じたまま1.5秒を超える | クリックは取り消され、「取り消しました」と言います。 |
+| 目が細まるほど下を見る | 「どうぞ」のあと「取り消しました」。クリックは起きず、約3秒後にカーソルが再び動きます。かなり下を向いている間はまばたきクリックが使えません。 |
 
-The phrases are spoken by the Japanese voice that ships with Windows; without one, three tones (high, higher, low) stand in for them.
-| Rest your gaze on a place far from the cursor (after calibration) | The cursor jumps there. |
-| Move the real mouse | The program lets go at once and takes over again 1.5 s after you stop. |
+フレーズは Windows 標準の日本語音声で読み上げられます。日本語音声がない環境では、3種類のトーン(高・より高・低)が代わりになります。
 
-Pointing with the head and clicking work straight away. The gaze jump needs a
-[calibration](#calibration) first.
+| キャリブレーション後、カーソルから遠い場所に視線を止める | カーソルがそこへジャンプします。 |
+| 実際のマウスを動かす | プログラムはすぐ手を放し、操作が止まってから1.5秒後に再び制御します。 |
 
-### Hotkeys and menu
+頭でのポインティングとまばたきクリックはすぐ使えます。視線ジャンプには先に[キャリブレーション](#キャリブレーション)が必要です。
 
-| Key | Menu item | |
+### ホットキーとメニュー
+
+| キー | メニュー項目 | |
 |---|---|---|
-| Ctrl+Alt+P | 一時停止 / 再開 | Pause and resume. While paused the camera is released. |
-| Ctrl+Alt+C | キャリブレーション / キャリブレーションを中止 | Start a calibration run, or cancel the one under way. |
-| | カメラのプレビュー | Show or hide what the camera sees, with the points found on your face. |
-| | 設定ファイルを開く | Open the settings file in Notepad. |
-| Ctrl+Alt+Q | 終了 | Quit. |
+| Ctrl+Alt+P | 一時停止 / 再開 | 一時停止中はカメラを解放します。 |
+| Ctrl+Alt+C | キャリブレーション / キャリブレーションを中止 | キャリブレーションの開始、または実行中のキャンセル。 |
+| | カメラのプレビュー | カメラの映像と、顔に検出した点を表示・非表示。 |
+| | 設定ファイルを開く | 設定ファイルをメモ帳で開きます。 |
+| Ctrl+Alt+Q | 終了 | 終了します。 |
 
-Right-click or left-click the icon for the menu. If another program already uses
-one of the key combinations, a notification says so and the menu item still works.
+アイコンを右クリックまたは左クリックするとメニューが出ます。キーの組み合わせが他のプログラムに使われている場合は通知で知らせ、メニュー項目はそのまま使えます。
 
-## Calibration
+## キャリブレーション
 
-A run takes about half a minute.
+1回の実行は30秒ほどです。
 
-1. Sit the way you will sit when you use the program, and put the mouse pointer on
-   the screen you want to calibrate. The run is for the screen the pointer is on.
-2. Press Ctrl+Alt+C. A dark page covers that screen and tells you what to do.
-   (This also ends a pause.)
-3. Look at the dot in the middle, eyes open, head still, until it moves on.
-4. Follow the dot with your eyes only, head still. It visits the middle and eight
-   places around the edge; the ring around it closes while a place is recorded.
-5. Look at the dot in the middle again and slowly turn your head left and right,
-   up and down, until the bar at the bottom is full.
-6. The page closes by itself. A notification says that the calibration is done and
-   how far off it typically is in pixels, or why it did not work.
+1. 実際に使う姿勢で座り、キャリブレーションしたい画面にマウスポインタを置きます。その画面が対象になります。
+2. Ctrl+Alt+C を押します。その画面を暗いページが覆い、手順を案内します(一時停止中でも解除されます)。
+3. 中央の点を見ます。目を開け、頭を動かさず、点が進むまで待ちます。
+4. 目だけで点を追います。頭は動かさないでください。点は中央と周囲8か所を回り、記録中は周りのリングが閉じていきます。
+5. 再び中央の点を見て、頭を左右・上下にゆっくり回し、下のバーがいっぱいになるまで続けます。
+6. ページは自動で閉じます。通知にキャリブレーション完了と、典型的なずれ(ピクセル)または失敗理由が出ます。
 
-Esc or Ctrl+Alt+C cancels a run. A run also ends by itself, saying why, when the
-face is out of view for 5 seconds, a step takes longer than 25 seconds, the camera
-stops delivering, the monitors change, or you pause.
+Esc または Ctrl+Alt+C でキャンセルできます。顔が5秒間映らない、1ステップが25秒を超える、カメラの供給が止まる、モニター構成が変わる、一時停止する、のいずれかでも理由を告げて終了します。
 
-The result is kept in `calibration.txt` and used again at the next start.
-Calibrate again when you move the camera, the monitor or your seat.
+結果は `calibration.txt` に保存され、次回起動時も使われます。カメラ・モニター・座る位置を変えたらキャリブレーションし直してください。
 
-## Stopping
+## 終了・停止
 
-- Quit: Ctrl+Alt+Q, 終了 in the icon's menu, or `eye-tracking-mouse.exe --quit`.
-- Get the cursor back at once without quitting: move the real mouse, or press
-  Ctrl+Alt+P to pause.
+- 終了: Ctrl+Alt+Q、アイコンのメニューの「終了」、または `eye-tracking-mouse.exe --quit`。
+- 終了せずすぐカーソルを取り戻す: 実際のマウスを動かすか、Ctrl+Alt+P で一時停止。
 
-## Settings and files
+## 設定とファイル
 
-Everything is kept in `%APPDATA%\eye-tracking-mouse\` (or the folder given with
-`--data-dir`):
+すべて `%APPDATA%\eye-tracking-mouse\` に置かれます(`--data-dir` で変更可):
 
-| File | |
+| ファイル | |
 |---|---|
-| `settings.txt` | Written with every setting at its default and an explanation the first time the program starts. Read at start only: quit and start again after changing it. |
-| `calibration.txt` | The last successful calibration: numbers describing your face shape and how your gaze maps to the screen. |
-| `log.txt` | What the program did since it was last started. Text only. |
+| `settings.txt` | 初回起動時に全設定と説明をデフォルト値で書き出します。読み込みは起動時のみ: 変更したら終了して起動し直してください。 |
+| `calibration.txt` | 最後に成功したキャリブレーション。顔の形と視線の画面への写し方を表す数値です。 |
+| `log.txt` | 前回起動以降にプログラムが行ったこと。テキストのみ。 |
 
-`settings.txt` sets the camera number, switches the gaze jump and the blink click
-on or off, and tunes the cursor speed for slow and quick head movements
-(`head_speed_slow`, `head_speed_fast`), how firmly a resting cursor is held
-(`head_steadiness`, 0.5 to 8, default 2: higher is calmer), the shortest gaze jump (`jump_distance`), and
-the blink click (`blink_hold`, `blink_limit`, `blink_closed`).
+`settings.txt` では、カメラ番号、視線ジャンプとまばたきクリックのオン/オフ、頭の遅い・速い動きに対するカーソル速度(`head_speed_slow`、`head_speed_fast`)、静止カーソルの保ち方(`head_steadiness`、0.5〜8、既定2: 大きいほど穏やか)、最短ジャンプ距離(`jump_distance`)、まばたきクリックの各値(`blink_hold`、`blink_limit`、`blink_closed`)を設定できます。
 
-## Command line
+## コマンドライン
 
 ```
 eye-tracking-mouse [options]
@@ -133,76 +113,63 @@ eye-tracking-mouse [options]
   --help                print this text
 ```
 
-Exit code: 0 done; 1 not done (a check failed, already running, nothing to quit);
-2 an error.
+終了コード: 0 = 成功、1 = 未達(チェック失敗・起動済み・終了対象なし)、2 = エラー。
 
-The program is built without a console, so PowerShell neither waits for it nor
-shows what it prints unless the output is piped:
+コンソールなしでビルドされているため、PowerShell は出力をパイプしない限り待ちも表示もしません:
 
 ```
 .\target\release\eye-tracking-mouse.exe --list-cameras | Out-Host
 ```
 
-Only one instance runs per desktop session; a second start tells the first one
-and ends.
+デスクトップセクションあたり1インスタンスだけが動きます。2回目の起動は1つ目に伝えて終了します。
 
-## Checks
+## 動作確認
 
 ```
-cargo test                                # unit and simulation tests; no camera, face or desktop needed
+cargo test                                # ユニット・シミュレーションテスト。カメラ・顔・デスクトップ不要
 cargo clippy --all-targets -- -D warnings
-cargo test --test resident -- --ignored   # starts the real program for a second, with a camera that does not exist
+cargo test --test resident -- --ignored   # 実際のプログラムを一瞬だけ起動(存在しないカメラを指定)
 ```
 
-The last one shows notifications, the preview window and, for a moment, the
-calibration page; it never touches the pointer.
+最後のものは通知、プレビューウィンドウ、一瞬のキャリブレーションページを表示しますが、ポインターには触れません。
 
-Checks of the machine it runs on (add `| Out-Host` in PowerShell):
+実行環境のチェック(PowerShell では `| Out-Host` を付けてください):
 
-| Command | What it checks |
+| コマンド | 確認内容 |
 |---|---|
-| `--selftest model` | The embedded model loads on this Windows and reproduces the reference outputs. |
-| `--selftest camera` | The camera delivers 1280x720 pictures fast enough. Turns the camera on for a few seconds. |
-| `--selftest pointer` | Cursor moves and a click land exactly where asked. Moves the real cursor for about a second and clicks a window of its own. |
-| `--selftest face` | A face is found and measured, from the camera or from `--image`. Prints numbers only. |
-| `--diag <seconds>` | Prints what the tracker measures once per second, for adjusting the settings. |
+| `--selftest model` | 埋め込みモデルがこの Windows で読み込め、リファレンス出力を再現するか。 |
+| `--selftest camera` | カメラが 1280x720 を十分な速さで出力するか。数秒間カメラをオンにします。 |
+| `--selftest pointer` | カーソル移動とクリックが指定位置に正確に届くか。実際のカーソルを1秒ほど動かし、自分のウィンドウを1回クリックします。 |
+| `--selftest face` | 顔が見つかり計測できるか。カメラ、または `--image` の画像で。数値のみ出力します。 |
+| `--diag <秒数>` | トラッカーの計測値を1秒ごとに表示。設定調整用。 |
 
-## Known limits
+## 既知の制限
 
-- The gaze estimate is coarse: tens of pixels at best, more toward the corners.
-  That is why the gaze only brings the cursor near and the head does the fine work.
-- The gaze jump works on the calibrated screen only. The head moves the cursor
-  across every screen.
-- Left click only: no right click, drag or scroll.
-- Windows of programs that run as administrator refuse the injected input while
-  this program runs without those rights. The tooltip then says カーソルを動かせません.
-- The hotkeys are fixed. On keyboard layouts where AltGr is Ctrl+Alt, characters
-  typed with AltGr+P, C or Q are taken while the program runs.
-- While the icon's menu is open, the program reacts to nothing but the hotkeys.
-- Settings are read at start only.
-- Starting at logon is not set up, and has not been tried.
+- 視線推定は粗く、良くて数十ピクセル、画面端ではさらにずれます。そのため視線はカーソルを近くへ運ぶだけに使い、細かい操作は頭に任せる設計です。
+- 視線ジャンプはキャリブレーションした画面でのみ動きます。頭での移動はすべての画面で使えます。
+- 左クリックのみ: 右クリック、ドラッグ、スクロールはありません。
+- 管理者権限で動くプログラムのウィンドウは、このプログラムが非特権で動いている間は注入した入力を拒否します。その間ツールチップは「カーソルを動かせません」と表示します。
+- ホットキーは固定です。AltGr が Ctrl+Alt になるキーボードレイアウトでは、AltGr+P・C・Q で入力する文字はこのプログラムが取ります。
+- アイコンのメニューを開いている間、プログラムはホットキー以外に反応しません。
+- 設定は起動時にだけ読まれます。
+- ログオン時の自動開始は用意しておらず、試してもいません。
 
-## Privacy
+## プライバシー
 
-Camera pictures are processed in memory and then dropped. None is written to disk
-and none leaves the machine: the program contains no network code. The preview
-only shows pictures on the screen. `calibration.txt` holds numbers about your face
-and stays in the folder above.
+カメラの映像はメモリ上で処理され、その場で捨てられます。ディスクに書き込まれることも、マシンの外に出ることもありません(ネットワークコードを含みません)。プレビューは画面に表示するだけです。`calibration.txt` には顔に関する数値が入りますが、上記のフォルダーに留まります。
 
-## Source layout
+## ソース構成
 
 ```
-src/app       the program: tray icon, worker thread, calibration page, preview, settings, wording
-src/platform  the Win32 / WinRT boundary: camera, inference, pointer, windows, drawing, sound
-src/control   pure decisions: calibration routine, gaze model, head pointing, blink click
-src/vision    pure geometry on face landmarks: crop, head pose, eye features
-tools/model   how the model was converted from TFLite to ONNX and compared
+src/app       プログラム本体: tray アイコン、ワーカースレッド、キャリブレーションページ、プレビュー、設定、文言
+src/platform  Win32 / WinRT の境界: カメラ、推論、ポインタ、ウィンドウ、描画、音声
+src/control   純粋な判定: キャリブレーション手順、視線モデル、頭ポインティング、まばたきクリック
+src/vision    顔ランドマーク上の純粋な幾何: 切り出し、頭部姿勢、目の特徴
+tools/model   TFLite から ONNX への変換と比較の記録
 ```
 
-Dependencies point downward only, and `control` and `vision` never touch the
-system, so what they decide is tested without a camera, a face or a desktop.
+依存は下向きのみで、`control` と `vision` はシステムに触れません。そのため判定ロジックはカメラ・顔・デスクトップなしでテストできます。
 
-## Notices
+## 謝辞・ライセンス
 
-The face landmark model is MediaPipe Face Mesh V2 by Google, Apache License 2.0.
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+顔ランドマークモデルは Google の MediaPipe Face Mesh V2 で、Apache License 2.0 です。[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
