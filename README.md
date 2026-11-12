@@ -113,7 +113,8 @@ Everything is kept in `%APPDATA%\eye-tracking-mouse\` (or the folder given with
 
 `settings.txt` sets the camera number, switches the gaze jump and the blink click
 on or off, and tunes the cursor speed for slow and quick head movements
-(`head_speed_slow`, `head_speed_fast`), the shortest gaze jump (`jump_distance`), and
+(`head_speed_slow`, `head_speed_fast`), how firmly a resting cursor is held
+(`head_steadiness`, 0.5 to 8, default 2: higher is calmer), the shortest gaze jump (`jump_distance`), and
 the blink click (`blink_hold`, `blink_limit`, `blink_closed`).
 
 ## Command line

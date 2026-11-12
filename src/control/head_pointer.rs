@@ -13,10 +13,10 @@ use super::filter::{Backlash, OneEuro2};
 
 /// How much turning the head counts compared with shifting it, in eye spans per unit of the facing vector.
 const LEVER: f32 = 1.0;
-/// Smoothing at rest (Hz) and how quickly it opens up with speed.
+/// Smoothing at rest (Hz) and how quickly it opens up with speed, at a steadiness of 1.
 const REST_CUTOFF: f32 = 1.0;
 const SPEED_RESPONSE: f32 = 10.0;
-/// Jitter below this many eye spans never moves the cursor (about 0.1 mm of head movement).
+/// Jitter below this many eye spans never moves the cursor (about 0.1 mm of head movement), at a steadiness of 1.
 const SLACK: f32 = 0.0012;
 /// Signal speeds (eye spans per second) at which the slow gain ends and the fast gain is reached.
 const SLOW_SPEED: f32 = 0.04;
@@ -29,6 +29,9 @@ pub struct HeadGain {
     pub slow: f32,
     /// For quick, long movement.
     pub fast: f32,
+    /// How firmly a resting cursor is held: the smoothing at rest and the jitter that is
+    /// ignored both grow with it. Higher is calmer and a little slower to start moving.
+    pub steadiness: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,8 @@ impl HeadPointer {
         }
         self.last_position = Some(pose.position);
         let raw = self.travel + pose.forward() * LEVER;
+        self.smoother.set_min_cutoff(REST_CUTOFF / gain.steadiness);
+        self.backlash.set_slack(SLACK * gain.steadiness);
         let signal = self.backlash.follow(self.smoother.filter(time, raw));
         let previous = self.last_signal.replace((time, signal));
         let Some((last_time, last_signal)) = previous else {
@@ -90,7 +95,7 @@ impl HeadPointer {
 mod tests {
     use super::*;
 
-    const GAIN: HeadGain = HeadGain { slow: 700.0, fast: 2200.0 };
+    const GAIN: HeadGain = HeadGain { slow: 700.0, fast: 2200.0, steadiness: 1.0 };
 
     fn pose(yaw: f32, pitch: f32, position: Vec2) -> HeadPose {
         HeadPose { yaw, pitch, roll: 0.0, position, scale: 200.0 }
@@ -124,6 +129,37 @@ mod tests {
         run(&mut pointer, 0, 10, |_| pose(0.0, 0.0, CENTRE));
         let shifted = run(&mut pointer, 10, 30, |t| pose(0.0, 0.0, CENTRE + Vec2::new(20.0 * t, 0.0)));
         assert!(shifted.x < -40.0, "0.1 eye spans toward image right: {shifted:?}");
+    }
+
+    /// The path the cursor travels while the head rests with strong jitter, and how far a turn carries it.
+    fn wobble_and_reach(steadiness: f32) -> (f32, f32) {
+        let gain = HeadGain { steadiness, ..GAIN };
+        let mut pointer = HeadPointer::default();
+        let mut state = 9u32;
+        let mut wobble = 0.0;
+        for frame in 0..300 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let jitter = (state >> 8) as f32 / 8_388_608.0 - 1.0;
+            let step = pointer.step(f64::from(frame) / 30.0, &pose(0.004 * jitter, 0.0, CENTRE + Vec2::new(jitter, -jitter)), &gain);
+            if frame > 30 {
+                wobble += step.length();
+            }
+        }
+        let mut reach = Vec2::ZERO;
+        for frame in 0..60 {
+            let yaw = 0.1 * (frame as f32 / 30.0).min(1.0);
+            reach = reach + pointer.step(f64::from(300 + frame) / 30.0, &pose(yaw, 0.0, CENTRE), &gain);
+        }
+        (wobble, reach.length())
+    }
+
+    #[test]
+    fn more_steadiness_calms_a_shaky_rest_and_a_turn_still_arrives() {
+        let (loose_wobble, loose_reach) = wobble_and_reach(1.0);
+        let (firm_wobble, firm_reach) = wobble_and_reach(3.0);
+        assert!(loose_wobble > 5.0, "the jitter is strong enough to show: {loose_wobble}");
+        assert!(firm_wobble < loose_wobble * 0.4, "{firm_wobble} against {loose_wobble}");
+        assert!(firm_reach > loose_reach * 0.85, "{firm_reach} against {loose_reach}");
     }
 
     #[test]

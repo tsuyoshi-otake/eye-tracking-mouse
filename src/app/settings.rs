@@ -36,6 +36,7 @@ fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
         "blink_click" => Slot::Switch(&mut tuning.blink_click),
         "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, 50.0, 5000.0),
         "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
+        "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
         "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
         "blink_hold" => Slot::Number(&mut tuning.blink.hold, 0.15, 3.0),
         "blink_limit" => Slot::Number(&mut tuning.blink.limit, 0.45, 10.0),
@@ -133,6 +134,8 @@ blink_click = {blink_click}
 head_speed_slow = {slow}
 # すばやく動かしたとき（head_speed_slow 以上、20000 まで）
 head_speed_fast = {fast}
+# カーソルの安定度（0.5〜8、大きいほど止まっているときに震えず、動き出しは少し遅くなる）
+head_steadiness = {steadiness}
 
 # 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
 # これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
@@ -149,6 +152,7 @@ blink_closed = {closed}
         blink_click = on_off(tuning.blink_click),
         slow = tuning.head_gain.slow,
         fast = tuning.head_gain.fast,
+        steadiness = tuning.head_gain.steadiness,
         jump = tuning.jump_distance,
         hold = tuning.blink.hold,
         limit = tuning.blink.limit,

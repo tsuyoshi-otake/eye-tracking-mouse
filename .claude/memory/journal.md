@@ -81,3 +81,10 @@
 - Verification: `cargo test voice -- --ignored` found the voice and said the three phrases (4 s); a long blink in the controller test yields `[Armed, Clicked]`; 156 unit tests, clippy clean, resident test against the release build, 0 processes before and after. Whether the person finds it clear is theirs to say.
 - Learning: the armed cue is said while the person waits with shut eyes and has about 1.1 s left to open them, so it must stay one word.
 
+## 2026-11-12 - A setting for how steady the cursor is (#1)
+
+- Symptom: the person, pointing and clicking with it, asked for more smoothing or stabilising of the cursor, "a setting would do".
+- Root cause: the smoothing at rest (1 Hz) and the ignored jitter (0.0012 eye spans) of the head pointer were constants chosen in simulation.
+- Fix: `head_steadiness` (0.5 to 8) divides the cutoff at rest and multiplies the ignored jitter; the default is 2, twice as firm as before. The settings file is written only once, so the line was appended to the person's existing file.
+- Verification: `more_steadiness_calms_a_shaky_rest_and_a_turn_still_arrives`: at 3 against 1 the path of a shaky resting cursor falls below 40 % and a turn of the head still carries the cursor at least 85 % as far; 157 unit tests, clippy clean, resident test against the release build. The right value for this person is theirs to find.
+

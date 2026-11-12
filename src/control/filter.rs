@@ -58,6 +58,12 @@ impl OneEuro2 {
         OneEuro2 { x: OneEuro::new(min_cutoff, beta), y: OneEuro::new(min_cutoff, beta) }
     }
 
+    /// Changes the cutoff at rest; what was filtered so far is kept.
+    pub fn set_min_cutoff(&mut self, min_cutoff: f32) {
+        self.x.min_cutoff = min_cutoff;
+        self.y.min_cutoff = min_cutoff;
+    }
+
     pub fn filter(&mut self, time: f64, value: Vec2) -> Vec2 {
         Vec2::new(self.x.filter(time, value.x), self.y.filter(time, value.y))
     }
@@ -75,6 +81,10 @@ pub struct Backlash {
 impl Backlash {
     pub const fn new(slack: f32) -> Self {
         Backlash { slack, output: None }
+    }
+
+    pub fn set_slack(&mut self, slack: f32) {
+        self.slack = slack;
     }
 
     pub fn follow(&mut self, input: Vec2) -> Vec2 {
