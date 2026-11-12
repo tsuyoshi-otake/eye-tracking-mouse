@@ -19,8 +19,15 @@
 /// measured on a person, an eye wanders between 0.6 and 1.0 of its widest while plainly open.
 const BASELINE_RISE: f32 = 1.5;
 const BASELINE_FALL: f32 = 3.0;
+/// Seconds for the estimate to accept lids that stayed low past the limit as the new normal.
+/// Measured on a person: looking down at a lower screen narrows the eyes as far as shutting
+/// them does (0.12 and 0.05 of the eye's width), and that is no blink that ever ends.
+const BASELINE_GIVE_IN: f32 = 0.5;
 /// The open-size estimate never goes below this, so noise on a shut eye cannot count as "open".
-const BASELINE_FLOOR: f32 = 0.1;
+const BASELINE_FLOOR: f32 = 0.03;
+/// Below this open size a blink cannot be told from the noise of the measurement, so none starts:
+/// with the eyes narrowed for good, a flicker of the lids must not turn into a click.
+const READABLE_SIZE: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlinkSettings {
@@ -79,7 +86,8 @@ impl BlinkClicker {
         };
         let (baseline, last_update) = self.baseline.unwrap_or((openness.map(|o| o.max(BASELINE_FLOOR)), time));
         let ratio = [openness[0] / baseline[0], openness[1] / baseline[1]];
-        let shut = ratio.iter().all(|&r| r < settings.closed_ratio);
+        let readable = baseline.iter().all(|&size| size >= READABLE_SIZE);
+        let shut = readable && ratio.iter().all(|&r| r < settings.closed_ratio);
         let open = ratio.iter().all(|&r| r > settings.open_ratio);
 
         let (next, event) = match self.state {
@@ -101,10 +109,15 @@ impl BlinkClicker {
         // Learn the open size whenever the eyes are not in a blink, also from an eye that has
         // become narrower than it was: otherwise it could never count as open again.
         let mut learned = baseline;
-        if next == State::Open {
+        if next == State::Open || next == State::Spent {
             let dt = (time - last_update).clamp(0.0, 0.2) as f32;
             for eye in 0..2 {
-                let seconds = if openness[eye] > learned[eye] { BASELINE_RISE } else { BASELINE_FALL };
+                let seconds = match next {
+                    // Past the limit this is not a blink: the pointer must not stay held for it.
+                    State::Spent => BASELINE_GIVE_IN,
+                    _ if openness[eye] > learned[eye] => BASELINE_RISE,
+                    _ => BASELINE_FALL,
+                };
                 learned[eye] = (learned[eye] + (openness[eye] - learned[eye]) * (dt / seconds).min(1.0)).max(BASELINE_FLOOR);
             }
         }
@@ -226,6 +239,24 @@ mod tests {
         assert_eq!(rig.events, [BlinkEvent::Armed, BlinkEvent::Click]);
         // And when the eye stays that narrow, the next long blink clicks as well.
         rig.feed(4.0, Some([0.26, 0.15])).feed(0.6, Some([0.05, 0.03])).feed(0.3, Some([0.26, 0.15]));
+        assert_eq!(rig.events[2..], [BlinkEvent::Armed, BlinkEvent::Click]);
+    }
+
+    /// Measured on a person with a second screen below the first: looking down reads like shut eyes.
+    #[test]
+    fn eyes_narrowed_for_good_stop_holding_the_pointer_and_blinks_work_again_afterwards() {
+        const DOWN: [f32; 2] = [0.12, 0.05];
+        let mut rig = Rig { clicker: BlinkClicker::default(), frame: 0, events: Vec::new() };
+        rig.feed(2.0, Some([0.30, 0.22])).feed(1.6, Some(DOWN));
+        assert_eq!(rig.events, [BlinkEvent::Armed, BlinkEvent::Cancelled]);
+        assert!(rig.clicker.is_closed());
+        rig.feed(1.4, Some(DOWN));
+        assert!(!rig.clicker.is_closed(), "three seconds in, the pointer is free again");
+        // Staying there makes no further sound, a flicker of the lids down there is no blink,
+        // and looking up again is not a click.
+        rig.feed(5.0, Some(DOWN)).feed(1.0, Some([0.05, 0.02])).feed(1.0, Some(DOWN)).feed(3.0, Some([0.30, 0.22]));
+        assert_eq!(rig.events.len(), 2);
+        rig.feed(0.6, Some([0.05, 0.03])).feed(0.2, Some([0.30, 0.22]));
         assert_eq!(rig.events[2..], [BlinkEvent::Armed, BlinkEvent::Click]);
     }
 
