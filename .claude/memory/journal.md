@@ -238,3 +238,9 @@
 - Verification: cargo test --lib 198 passed; clippy clean; release resident test 1 passed, 0 processes before/after. Publishing checklist same as v0.2.0 (AppId GUID, already-public author email; public; tags v0.1.0/v0.2.0; LICENSE present).
 - Published: PR #14 merged as 1f6c850, tag v0.3.0, prerelease "v0.3.0 (実験版)" with setup.exe (4,955,738 bytes), portable exe, SHA256SUMS.txt (downloaded copy equals the local one). #12 and #13 closed. No independent verifier this time (skipped at the person's request for speed); installer not reinstalled.
 - Learning: a fit's share constant is a guess until a person tries it; one real run moved REACH_SHARE from 0.7 to 1.0.
+
+## 2026-11-14 - README for the people the program is for (PR #15)
+- Work: README opens with 「はじめての方へ」 after the person's announcement post: what it does and cannot do yet (right click, drag, scroll), head vs gaze (head corrected while watching the cursor; gaze ~100 px / ~3 deg measured), the person's comparison figure, five "しくみ" cards cut from the person's explanation video (lower part only; the third-party aiming game recording left out), what is needed, a 5-minute start with the task tray explained (no window, eye icon, ^, right-click menu), what to do when stuck, Apache-2.0 in plain words, where to report. Every figure has its full text as alt text.
+- Verification: wording checked against wording.rs (start notification title), setup.iss ([Run] postinstall launch), LICENSE; anchors #設定とファイル, #謝辞ライセンス.
+- Published: PR #15 merged as a80de2d, branch deleted.
+- Learning: the X post was read through the public oEmbed endpoint (the x-api skill had no credentials); its text arrives cut at "…". No ffmpeg on this box: frames came from opencv-python-headless 4.11.0.86 in a throwaway venv under ~/tmp, deleted afterwards.
