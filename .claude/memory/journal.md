@@ -231,3 +231,10 @@
 - Fix: 76da380 removed the jump (fail-before: cursor at (2228, 295) after a look at (2200, 300)). Then control/head_calibration.rs: rest 3 s + four held turns; fast = screen / (0.7 x comfortable range), slow = fast/3, steadiness = least step whose replay of the rest's shake (0.5 s moving mean removed) moves the cursor <= 3 px/s. Ctrl+Alt+H, Routine::Head, Notice::HeadCalibrated, settings::with_head_gain.
 - Verification: cargo test --lib 198 passed; clippy -D warnings clean; release resident test 1 passed, 0 processes before/after.
 - Learning: the person's stillest 3 s stretches of pointing records still drift 0.011-0.021 eye spans; replaying raw rests asked for steadiness 8 always. Judge steadiness on the shake only: that asked for 3-4 (median) at the fitted speeds.
+
+## 2026-11-14 - Head speed share and the v0.3.0 release (#12, #13)
+- Symptom: the first real head calibration fitted slow 835 / fast 2504; the person found the pointer a little fast. 585 / 1750 (-30 %) felt right.
+- Fix: REACH_SHARE 0.7 -> 1.0 (a quick turn through the whole comfortable range crosses the screen), which gives exactly those speeds. Version 0.3.0.
+- Verification: cargo test --lib 198 passed; clippy clean; release resident test 1 passed, 0 processes before/after. Publishing checklist same as v0.2.0 (AppId GUID, already-public author email; public; tags v0.1.0/v0.2.0; LICENSE present).
+- Published: PR #14 merged as 1f6c850, tag v0.3.0, prerelease "v0.3.0 (実験版)" with setup.exe (4,955,738 bytes), portable exe, SHA256SUMS.txt (downloaded copy equals the local one). #12 and #13 closed. No independent verifier this time (skipped at the person's request for speed); installer not reinstalled.
+- Learning: a fit's share constant is a guess until a person tries it; one real run moved REACH_SHARE from 0.7 to 1.0.
