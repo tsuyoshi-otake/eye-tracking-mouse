@@ -1,6 +1,6 @@
 //! What the program says to the person, in one place. Everything here is Japanese.
 
-use crate::control::calibration::{Failure, Phase};
+use crate::control::calibration::{Failure, Phase, Score};
 use crate::control::controller::Activity;
 
 use super::engine::GazeProblem;
@@ -180,7 +180,13 @@ pub fn instruction(phase: Phase) -> &'static str {
         Phase::Rest => "中央の点を見つめて、頭を動かさずにお待ちください",
         Phase::Places => "頭は動かさず、目だけで点を追ってください",
         Phase::Sweep => "中央の点を見つめたまま、頭を上下左右にゆっくり回してください",
+        Phase::Check => "テスト：出てくる点を目で追ってください",
     }
+}
+
+/// The line that ends the check: how many of its places the model hit and how far off it was.
+pub fn check_score(score: Score) -> String {
+    format!("命中 {} / {}　　平均のずれ 約{:.0}ピクセル", score.hits, score.places, score.mean_px)
 }
 
 /// Shown when one of the program's own windows cannot be opened.

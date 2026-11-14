@@ -34,6 +34,7 @@ impl CalibrationRecord {
             Phase::Rest => "rest",
             Phase::Places => "places",
             Phase::Sweep => "sweep",
+            Phase::Check => "check",
         };
         let _ = write!(self.text, "frame = {:.4} {stage} {} {} {:.3}", mesh.time, view.target.0, view.target.1, view.dwell);
         for point in &mesh.points {
@@ -56,7 +57,7 @@ mod tests {
     #[test]
     fn a_record_has_a_line_per_frame_with_what_was_shown_and_every_point() {
         let mut record = CalibrationRecord::begin(RectI::new(0, 0, 1920, 1080), (1280, 720));
-        let view = View { phase: Phase::Places, target: (154, 86), dwell: 0.25, progress: 0.3, face_visible: true };
+        let view = View { phase: Phase::Places, target: (154, 86), dwell: 0.25, progress: 0.3, face_visible: true, answer: None, score: None };
         let mesh = FaceMesh { points: vec![[1.0, 2.5, -3.126]; 4], presence: 1.0, time: 12.5 };
         record.add(&view, &mesh);
         record.add(&View { phase: Phase::Sweep, ..view }, &mesh);

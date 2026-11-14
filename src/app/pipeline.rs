@@ -758,7 +758,15 @@ mod tests {
             let board = shared.board();
             (board.status.clone(), board.view)
         };
-        let view = View { phase: Phase::Rest, target: (960, 540), dwell: 0.0, progress: 0.0, face_visible: true };
+        let view = View {
+            phase: Phase::Rest,
+            target: (960, 540),
+            dwell: 0.0,
+            progress: 0.0,
+            face_visible: true,
+            answer: None,
+            score: None,
+        };
         let quiet = |mode, finished| Output { pointer: None, sound: None, mode, finished };
         worker.report(&quiet(Mode::Calibrating(view), None), None, false);
         assert_eq!(seen(), (Status::Calibrating, Some((7, view))));
