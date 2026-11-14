@@ -123,9 +123,22 @@ pub enum Activity {
     Blocked,
 }
 
+/// What the frame's pointing was made of. Nothing acts on it; it is for
+/// looking into afterwards why the cursor went where it did.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Makeup {
+    /// The gaze model's estimate in desktop pixels, when it was asked.
+    pub estimate: Option<Vec2>,
+    /// Where the eyes put the cursor after filtering (eye and hybrid mode).
+    pub eyes: Option<Vec2>,
+    /// What the head added in this frame, in pixels.
+    pub nudge: Vec2,
+}
+
 /// What to do after this frame. At most one of `move_to` and `click_at` is set.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Decision {
+    pub makeup: Makeup,
     pub move_to: Option<(i32, i32)>,
     /// Put the cursor on this pixel and left-click.
     pub click_at: Option<(i32, i32)>,
@@ -222,12 +235,16 @@ impl Controller {
             self.anchor = None;
         }
 
+        let mut makeup = Makeup::default();
         if !closed && time >= self.steady_from {
             match tuning.pointing {
                 PointingMode::Head => {
-                    position = position + self.head.step(time, &face.pose, &tuning.head_gain);
+                    makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                    position = position + makeup.nudge;
                     if let Some(calibration) = frame.calibration.filter(|_| tuning.gaze_jump) {
-                        let rest = self.fixation.step(time, calibration.gaze.predict(face), tuning.jump_distance * NEW_PLACE_SHARE);
+                        let estimate = calibration.gaze.predict(face);
+                        makeup.estimate = Some(estimate);
+                        let rest = self.fixation.step(time, estimate, tuning.jump_distance * NEW_PLACE_SHARE);
                         let place = rest.and_then(|place| landing(calibration.area, place));
                         if let Some(place) = place.filter(|place| place.distance(position) >= tuning.jump_distance) {
                             position = place;
@@ -238,23 +255,31 @@ impl Controller {
                     // The estimate is the position, kept on the calibrated
                     // screen. Looking past it holds the cursor where it is.
                     Some(calibration) => {
-                        if let Some(place) = landing(calibration.area, calibration.gaze.predict(face)) {
+                        let estimate = calibration.gaze.predict(face);
+                        makeup.estimate = Some(estimate);
+                        if let Some(place) = landing(calibration.area, estimate) {
                             position = self.eye.step(time, place, tuning.eye_steadiness);
+                            makeup.eyes = Some(position);
                         }
                     }
                     // No calibration yet: the head carries pointing until there is one.
-                    None => position = position + self.head.step(time, &face.pose, &tuning.head_gain),
+                    None => {
+                        makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                        position = position + makeup.nudge;
+                    }
                 },
                 PointingMode::Hybrid => {
-                    let nudge = self.head.step(time, &face.pose, &tuning.head_gain);
-                    let seen = frame.calibration.and_then(|calibration| landing(calibration.area, calibration.gaze.predict(face)));
+                    makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                    makeup.estimate = frame.calibration.map(|calibration| calibration.gaze.predict(face));
+                    let seen = frame.calibration.zip(makeup.estimate).and_then(|(calibration, estimate)| landing(calibration.area, estimate));
                     position = match seen {
                         Some(place) => {
                             let eyes = self.eye.step(time, place, tuning.eye_steadiness);
-                            self.correction.step(position, eyes, nudge, tuning.jump_distance)
+                            makeup.eyes = Some(eyes);
+                            self.correction.step(position, eyes, makeup.nudge, tuning.jump_distance)
                         }
                         // No calibration, or looking past the screen: the eyes hold their part and the head goes on.
-                        None => position + nudge,
+                        None => position + makeup.nudge,
                     };
                 }
             }
@@ -272,7 +297,7 @@ impl Controller {
         let Some(pixel) = clamp_to_union(frame.screens, f64::from(position.x), f64::from(position.y)) else {
             // No screen to be on: start over from the cursor once there is one.
             self.position = None;
-            return Decision { sound: sound_for(event), activity: Activity::Blocked, ..Decision::default() };
+            return Decision { sound: sound_for(event), activity: Activity::Blocked, makeup, ..Decision::default() };
         };
         // At an edge the position stops with the cursor, so turning back takes effect at once.
         if (pixel.0 as f32 - position.x).abs() > 0.5 {
@@ -282,7 +307,7 @@ impl Controller {
             position.y = pixel.1 as f32;
         }
         self.position = Some(position);
-        let mut decision = Decision { sound: sound_for(event), ..Decision::default() };
+        let mut decision = Decision { sound: sound_for(event), makeup, ..Decision::default() };
         if clicking {
             decision.click_at = Some(pixel);
             self.guard.commanded(pixel);

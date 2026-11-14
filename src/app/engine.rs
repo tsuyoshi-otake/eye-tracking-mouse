@@ -15,7 +15,7 @@
 //!   it ends, or with `cancel_calibration` returning true.
 
 use crate::control::calibration::{Calibration, CalibrationSession, Failure, Step, View};
-use crate::control::controller::{Activity, Controller, Frame, PointingMode, Sound, Tuning};
+use crate::control::controller::{Activity, Controller, Frame, Makeup, PointingMode, Sound, Tuning};
 use crate::geometry::RectI;
 use crate::vision::landmarks::FaceMesh;
 use crate::vision::pose::{ReferenceBuilder, ReferenceShape};
@@ -53,8 +53,17 @@ pub enum Mode {
     Calibrating(View),
 }
 
+/// What a frame of pointing was decided from: the face as measured, and what the cursor's move was made of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Trace {
+    pub face: FaceMeasurement,
+    pub makeup: Makeup,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Output {
+    /// Set in a frame of pointing in which a face was measured. Nothing acts on it.
+    pub trace: Option<Trace>,
     pub pointer: Option<PointerAction>,
     pub sound: Option<Sound>,
     pub mode: Mode,
@@ -114,6 +123,10 @@ impl Engine {
         self.tuning.gaze_jump || self.tuning.pointing != PointingMode::Head
     }
 
+    pub fn pointing(&self) -> PointingMode {
+        self.tuning.pointing
+    }
+
     /// Changes what moves the cursor. Pointing starts afresh, as after any break.
     pub fn set_pointing(&mut self, pointing: PointingMode) {
         if self.tuning.pointing != pointing {
@@ -157,7 +170,7 @@ impl Engine {
     }
 
     fn calibrate(&mut self, session: CalibrationSession, input: &Input) -> Output {
-        let quiet = |mode, finished| Output { pointer: None, sound: None, mode, finished };
+        let quiet = |mode, finished| Output { trace: None, pointer: None, sound: None, mode, finished };
         match session.step(input.time, input.mesh) {
             Step::Running(session) => {
                 let view = session.view(input.time);
@@ -185,7 +198,8 @@ impl Engine {
             (None, Some((x, y))) => Some(PointerAction::Move(x, y)),
             (None, None) => None,
         };
-        Output { pointer, sound: decision.sound, mode: Mode::Pointing(decision.activity), finished: None }
+        let trace = face.map(|face| Trace { face, makeup: decision.makeup });
+        Output { trace, pointer, sound: decision.sound, mode: Mode::Pointing(decision.activity), finished: None }
     }
 
     /// Measures the face against the person's shape: the calibrated one, or

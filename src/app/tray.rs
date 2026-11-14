@@ -203,8 +203,8 @@ impl App {
         log.line(&format!("camera {}", camera.device_index));
         let poster = Poster::new(window, FROM_WORKER);
         let pointing = settings.tuning.pointing;
-        let record_calibration = settings.record_calibration;
-        let setup = Setup { camera, tuning: settings.tuning, storage: storage.clone(), record_calibration };
+        let (record_calibration, record_pointing) = (settings.record_calibration, settings.record_pointing);
+        let setup = Setup { camera, tuning: settings.tuning, storage: storage.clone(), record_calibration, record_pointing };
         let pipeline = Pipeline::start(setup, move || {
             poster.post();
         })?;

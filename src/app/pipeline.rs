@@ -44,7 +44,7 @@ use super::backoff::Backoff;
 use super::engine::{Engine, GazeProblem, Input, Mode, Output, PointerAction, gaze_problem};
 use super::face::{self, Tracker};
 use super::preview::{self, Picture};
-use super::record::CalibrationRecord;
+use super::record::{CalibrationRecord, PointingRecord};
 use super::storage::Storage;
 
 /// How long `stop` waits for the worker.
@@ -109,6 +109,8 @@ pub struct Setup {
     pub storage: Storage,
     /// Keep a record of every calibration run that ends by itself.
     pub record_calibration: bool,
+    /// Keep a record of pointing.
+    pub record_pointing: bool,
 }
 
 enum Command {
@@ -387,6 +389,8 @@ struct Worker<'a> {
     record_wanted: bool,
     /// The record of the run the engine is working on, when one is wanted.
     record: Option<CalibrationRecord>,
+    /// The record of pointing since it was last put away, when one is wanted.
+    pointing_record: Option<PointingRecord>,
     /// What the owner was last told about the gaze.
     gaze_problem: Option<GazeProblem>,
     announcer: Announcer,
@@ -416,6 +420,7 @@ impl<'a> Worker<'a> {
             run: None,
             record_wanted: setup.record_calibration,
             record: None,
+            pointing_record: setup.record_pointing.then(PointingRecord::default),
             gaze_problem: None,
             announcer: Announcer::new(),
             frame: BgraFrame::default(),
@@ -427,6 +432,7 @@ impl<'a> Worker<'a> {
     fn run(&mut self, tracker: &mut Tracker) {
         loop {
             let flow = if self.shared.paused.load(Ordering::SeqCst) {
+                self.keep_pointing_record();
                 self.close(CalibrationProblem::Paused);
                 self.shared.set(Status::Paused, None);
                 let flow = self.listen(Wait::UntilCommand);
@@ -450,8 +456,17 @@ impl<'a> Worker<'a> {
                 flow
             };
             if flow == Flow::Quit {
+                self.keep_pointing_record();
                 return;
             }
+        }
+    }
+
+    /// Puts the record of pointing away in a file and begins a new one. Nothing happens without frames in it.
+    fn keep_pointing_record(&mut self) {
+        if let Some(record) = self.pointing_record.as_mut().filter(|record| !record.is_empty()) {
+            // The record is an aid for whoever asked for it; pointing goes on whether or not it could be kept.
+            let _ = self.storage.save_pointing_record(&std::mem::take(record).finish());
         }
     }
 
@@ -590,13 +605,11 @@ impl<'a> Worker<'a> {
         }
         self.begin_waiting_run(frame_size, time);
         let screens = self.desktop.as_ref().map_or(&[][..], Desktop::monitors);
-        let output = self.engine.frame(&Input {
-            time,
-            mesh: found.then_some(&self.mesh),
-            frame_size,
-            cursor: pointer::cursor_position(),
-            screens,
-        });
+        let cursor = pointer::cursor_position();
+        let output = self.engine.frame(&Input { time, mesh: found.then_some(&self.mesh), frame_size, cursor, screens });
+        if let Some(record) = &mut self.pointing_record {
+            record.add(time, self.engine.pointing(), cursor, &output);
+        }
         let gaze_used = self.engine.uses_gaze();
         let problem = self.engine.calibration().filter(|_| gaze_used).and_then(|c| gaze_problem(c, frame_size, screens));
         let refused = self.act(&output);
@@ -604,6 +617,9 @@ impl<'a> Worker<'a> {
             record.add(view, &self.mesh);
         }
         self.report(&output, problem, refused);
+        if self.pointing_record.as_ref().is_some_and(PointingRecord::is_full) {
+            self.keep_pointing_record();
+        }
     }
 
     /// Carries out what the engine answered. True when the system refused the pointer action.
@@ -702,6 +718,7 @@ mod tests {
             tuning: Tuning::default(),
             storage: Storage::open(&scratch.0).unwrap(),
             record_calibration: false,
+            record_pointing: false,
         };
         (scratch, setup)
     }
@@ -767,7 +784,7 @@ mod tests {
             answer: None,
             score: None,
         };
-        let quiet = |mode, finished| Output { pointer: None, sound: None, mode, finished };
+        let quiet = |mode, finished| Output { trace: None, pointer: None, sound: None, mode, finished };
         worker.report(&quiet(Mode::Calibrating(view), None), None, false);
         assert_eq!(seen(), (Status::Calibrating, Some((7, view))));
         let ended = quiet(Mode::Pointing(Activity::Tracking), Some(Err(Failure::FaceLost)));

@@ -21,6 +21,8 @@ pub struct Settings {
     pub tuning: Tuning,
     /// Keep a record of every calibration run (see `record`).
     pub record_calibration: bool,
+    /// Keep a record of pointing (see `record`).
+    pub record_pointing: bool,
 }
 
 /// One setting's place in `Settings`, with the values it accepts.
@@ -37,6 +39,7 @@ fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
     Some(match name {
         "camera" => Slot::Camera(&mut settings.camera),
         "calibration_record" => Slot::Switch(&mut settings.record_calibration),
+        "pointing_record" => Slot::Switch(&mut settings.record_pointing),
         "pointing" => Slot::Pointing(&mut tuning.pointing),
         "gaze_jump" => Slot::Switch(&mut tuning.gaze_jump),
         "blink_click" => Slot::Switch(&mut tuning.blink_click),
@@ -166,7 +169,7 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
 
 /// The file written when there is none yet: every setting at its default, explained.
 pub fn template() -> String {
-    let Settings { camera, tuning, record_calibration } = Settings::default();
+    let Settings { camera, tuning, record_calibration, record_pointing } = Settings::default();
     let on_off = |on: bool| if on { "on" } else { "off" };
     format!(
         "\
@@ -220,6 +223,12 @@ blink_closed = {closed}
 # on にすると、キャリブレーションのたびに calibration-record-<時刻>.txt をこのフォルダーに残します。
 # 中身は各フレームの顔の点の座標（数値のみ、1回で数MB）で、画像は含みません。不要になったら削除してください。
 calibration_record = {record}
+
+# カーソルの動きの記録（動きがおかしいときの原因を調べるためのもの）: on / off
+# on にすると、動作中の毎フレームの数値（頭の向き、目の信号、視線の推定位置、カーソルへの指示）を
+# pointing-record-<時刻>.txt に残します。一時停止・終了のとき、または10分ごとに書き出します。
+# 画像は含みません。不要になったら削除してください。
+pointing_record = {pointing_record}
 ",
         pointing = pointing_word(tuning.pointing),
         gaze_jump = on_off(tuning.gaze_jump),
@@ -233,6 +242,7 @@ calibration_record = {record}
         limit = tuning.blink.limit,
         closed = tuning.blink.closed_ratio,
         record = on_off(record_calibration),
+        pointing_record = on_off(record_pointing),
     )
 }
 
@@ -246,7 +256,7 @@ mod tests {
         assert_eq!(settings, Settings::default());
         assert_eq!(warnings, Vec::<String>::new());
         // Every setting is offered in the template.
-        let names = ["camera", "calibration_record", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "jump_distance"];
+        let names = ["camera", "calibration_record", "pointing_record", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "jump_distance"];
         for name in names.into_iter().chain(["blink_hold", "blink_limit", "blink_closed"]) {
             assert!(slot(&mut Settings::default(), name).is_some(), "{name}");
             assert!(template().contains(&format!("\n{name} = ")), "{name}");

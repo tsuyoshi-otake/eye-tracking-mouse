@@ -22,6 +22,7 @@ const SETTINGS_FILE: &str = "settings.txt";
 const CALIBRATION_FILE: &str = "calibration.txt";
 const LOG_FILE: &str = "log.txt";
 const RECORD_PREFIX: &str = "calibration-record-";
+const POINTING_RECORD_PREFIX: &str = "pointing-record-";
 
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -88,6 +89,12 @@ impl Storage {
     pub fn save_calibration_record(&self, text: &str) -> Result<()> {
         let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
         self.replace(&format!("{RECORD_PREFIX}{seconds}.txt"), text).context("write the calibration record")
+    }
+
+    /// Keeps a record of pointing in a file of its own, named after the time it was written.
+    pub fn save_pointing_record(&self, text: &str) -> Result<()> {
+        let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        self.replace(&format!("{POINTING_RECORD_PREFIX}{seconds}.txt"), text).context("write the pointing record")
     }
 
     /// Whether a calibration has been saved. It may still turn out to be unreadable.
