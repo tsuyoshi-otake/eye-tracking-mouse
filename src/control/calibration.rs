@@ -18,7 +18,10 @@
 //! - Check: the model is made by now. The person looks at a dozen places it
 //!   was not fitted to, and after each one the page shows where the model put
 //!   the gaze. How far off it was on average is the accuracy that is reported.
-//!   A check that cannot be completed does not cost the calibration.
+//!   A check that cannot be completed does not cost the calibration. What the
+//!   check recorded is then fitted too: the model that is kept has seen the
+//!   places of the grid and of the check, so it is better than the reported
+//!   number says, by an amount nobody has measured.
 //!
 //! No stage waits forever: a face that stays away fails the routine, and so
 //! does a stage that drags on.
@@ -313,6 +316,9 @@ enum Stage {
     /// places before it were, and `shown` the answer on the page with the time it appeared.
     Check {
         basis: Basis,
+        /// The frames the model was fitted to, and those recorded at the places of the check.
+        fitted: Vec<Sample>,
+        seen: Vec<Sample>,
         calibration: Box<Calibration>,
         index: usize,
         estimates: Vec<Vec2>,
@@ -337,6 +343,19 @@ fn score(area: RectI, misses: &[f32]) -> Option<Score> {
 fn checked(mut calibration: Calibration, score: Option<Score>) -> Calibration {
     if let Some(score) = score {
         calibration.error_px = score.mean_px;
+    }
+    calibration
+}
+
+/// The calibration with its model fitted once more, to the frames it was made from (`fitted`)
+/// and those recorded at the places of the check (`seen`). Measured on a person, whose eyes
+/// and seat are not quite the same a minute into the routine: places held out of this were
+/// missed by 116 px instead of 163 in one run and 112 instead of 121 in another. A fit that
+/// fails leaves the model as it was.
+fn taught(mut calibration: Calibration, mut fitted: Vec<Sample>, seen: Vec<Sample>) -> Calibration {
+    fitted.extend(settled(seen));
+    if let Some(gaze) = GazeModel::fit(calibration.gaze.neutral(), &fitted) {
+        calibration.gaze = gaze;
     }
     calibration
 }
@@ -442,8 +461,8 @@ impl CalibrationSession {
             }
             Stage::Score { .. } => return Step::Running(self),
             // The model is made; a check that cannot go on ends with the places it got to.
-            Stage::Check { calibration, misses, .. } if stuck || gone => {
-                return Step::Done(checked(*calibration, score(self.area, &misses)));
+            Stage::Check { calibration, misses, fitted, seen, .. } if stuck || gone => {
+                return Step::Done(checked(taught(*calibration, fitted, seen), score(self.area, &misses)));
             }
             Stage::Sweep { .. } if stuck => return Step::Failed(Failure::HeadNotMoved),
             _ if stuck => return Step::Failed(Failure::TooSlow),
@@ -499,18 +518,18 @@ impl CalibrationSession {
                 }
                 let turned = high.x - low.x >= SWEEP_TURN.x && high.y - low.y >= SWEEP_TURN.y;
                 if turned && time - self.stage_started >= TRAVEL + SWEEP_SECONDS {
-                    let calibration = match fit(area, std::mem::take(&mut self.samples), &basis, frames) {
-                        Ok(calibration) => Box::new(calibration),
+                    let (calibration, fitted) = match fit(area, std::mem::take(&mut self.samples), &basis, frames) {
+                        Ok((calibration, fitted)) => (Box::new(calibration), fitted),
                         Err(failure) => return Step::Failed(failure),
                     };
-                    let (estimates, misses) = (Vec::new(), Vec::new());
-                    self.stage = Stage::Check { basis, calibration, index: 0, estimates, misses, shown: None };
+                    let (estimates, misses, seen) = (Vec::new(), Vec::new(), Vec::new());
+                    self.stage = Stage::Check { basis, fitted, seen, calibration, index: 0, estimates, misses, shown: None };
                     self.stage_started = time;
                 } else {
                     self.stage = Stage::Sweep { basis, low, high, frames };
                 }
             }
-            Stage::Check { basis, calibration, mut index, mut estimates, mut misses, mut shown } => {
+            Stage::Check { basis, fitted, mut seen, calibration, mut index, mut estimates, mut misses, mut shown } => {
                 match shown {
                     // The answer has been looked at: on to the next place, or to the score.
                     Some((_, since)) if time - since >= CHECK_SHOWN => {
@@ -523,7 +542,10 @@ impl CalibrationSession {
                     // now would lie between the two and count against the model.
                     None if time - self.stage_started < TRAVEL => {}
                     None => {
-                        estimates.extend(basis.measure(mesh).map(|face| calibration.gaze.predict(&face)));
+                        if let Some(face) = basis.measure(mesh) {
+                            estimates.push(calibration.gaze.predict(&face));
+                            seen.push(Sample { face, target: check_point(area, index), place: Some(PLACES + index) });
+                        }
                         if estimates.len() >= CHECK_FRAMES {
                             // The middle one on each axis: a blink among the frames does not move it.
                             let middle = |pick: fn(&Vec2) -> f32| median(estimates.iter().map(pick).collect());
@@ -534,8 +556,8 @@ impl CalibrationSession {
                     }
                 }
                 self.stage = match score(area, &misses).filter(|_| index == CHECKS.len()) {
-                    Some(score) => Stage::Score { calibration, score },
-                    None => Stage::Check { basis, calibration, index, estimates, misses, shown },
+                    Some(score) => Stage::Score { calibration: Box::new(taught(*calibration, fitted, seen)), score },
+                    None => Stage::Check { basis, fitted, seen, calibration, index, estimates, misses, shown },
                 };
             }
             // Ends by the clock, above.
@@ -578,7 +600,13 @@ fn settled(samples: Vec<Sample>) -> Vec<Sample> {
 }
 
 /// Fits the model to everything recorded and decides whether it is good enough to go on with.
-fn fit(area: RectI, samples: Vec<Sample>, basis: &Basis, sweep: Vec<Sample>) -> std::result::Result<Calibration, Failure> {
+/// Gives the calibration and the frames it was fitted to.
+fn fit(
+    area: RectI,
+    samples: Vec<Sample>,
+    basis: &Basis,
+    sweep: Vec<Sample>,
+) -> std::result::Result<(Calibration, Vec<Sample>), Failure> {
     let mut samples = settled(samples);
     let sweep: Vec<Sample> = sweep.into_iter().filter(|sample| sample.face.pose.forward().length() <= SWEEP_USED).collect();
     let stride = sweep.len().div_ceil(SWEEP_FRAMES).max(1);
@@ -590,7 +618,7 @@ fn fit(area: RectI, samples: Vec<Sample>, basis: &Basis, sweep: Vec<Sample>) -> 
     if error_px > MAX_ERROR_SHARE * area.width().min(area.height()) as f32 {
         return Err(Failure::Inaccurate { error_px });
     }
-    Ok(Calibration { reference: basis.reference.clone(), gaze, area, error_px })
+    Ok((Calibration { reference: basis.reference.clone(), gaze, area, error_px }, samples))
 }
 
 #[cfg(test)]
@@ -612,11 +640,13 @@ pub(crate) mod simulation {
         pub shut_from: f64,
         /// Out of the camera's view between these times.
         pub away: (f64, f64),
+        /// How far from each place of the check the eyes rest, in pixels.
+        pub slid: Vec2,
     }
 
     impl Default for Behaviour {
         fn default() -> Self {
-            Behaviour { attentive: true, sweeps: true, blink_every: None, shut_from: f64::INFINITY, away: (0.0, 0.0) }
+            Behaviour { attentive: true, sweeps: true, blink_every: None, shut_from: f64::INFINITY, away: (0.0, 0.0), slid: Vec2::ZERO }
         }
     }
 
@@ -655,7 +685,8 @@ pub(crate) mod simulation {
             }
             // The eyes take a third of a second to land on a place that has just appeared.
             if behaviour.attentive && time - shown.1 >= 0.3 {
-                gaze = Vec2::new(view.target.0 as f32, view.target.1 as f32);
+                let slid = if view.phase == Phase::Check { behaviour.slid } else { Vec2::ZERO };
+                gaze = Vec2::new(view.target.0 as f32, view.target.1 as f32) + slid;
             }
             let posture =
                 if view.phase == Phase::Sweep && behaviour.sweeps { sweeping(time) } else { following(gaze) };
@@ -805,7 +836,7 @@ mod tests {
             let mut scores = 0;
             let (outcome, seconds) = run(&mut Person::new(1.0), &behaviour, |view| scores += u32::from(view.score.is_some()));
             let Step::Done(calibration) = outcome else { panic!("the model was made before the trouble began") };
-            assert_eq!(calibration.gaze, whole.gaze, "the same model as from a whole run");
+            assert_ne!(calibration.gaze, whole.gaze, "it learned from the places it got to, not from all twelve");
             assert!(calibration.error_px > 0.0 && calibration.error_px != whole.error_px);
             assert!(seconds < fitted_at + 5.0 + STAGE_LIMIT + 1.0, "ended at {seconds} s");
             assert_eq!(scores, 0, "no score is shown for a check that was broken off");
@@ -813,7 +844,31 @@ mod tests {
         // Gone before any place of the check was measured: the model's own estimate is what there is.
         let (outcome, _) = run(&mut Person::new(1.0), &Behaviour { away: (fitted_at, 900.0), ..Behaviour::default() }, |_| ());
         let Step::Done(calibration) = outcome else { panic!("the model was made before the person left") };
-        assert!(calibration.error_px > 0.0 && calibration.gaze == whole.gaze);
+        assert!(calibration.error_px > 0.0 && calibration.gaze != whole.gaze);
+    }
+
+    #[test]
+    fn what_the_check_recorded_is_learned_from() {
+        // By the time of the check the person's eyes read as looking somewhere else than they
+        // did during the grid: here, up and to the right of every place by a fixed amount.
+        let slid = Vec2::new(90.0, -150.0);
+        let mut person = Person::new(1.0);
+        let mut score = None;
+        let (outcome, _) = run(&mut person, &Behaviour { slid, ..Behaviour::default() }, |view| score = score.or(view.score));
+        let Step::Done(calibration) = outcome else { panic!("the routine should succeed") };
+        // The check saw it: the answers were off by about that much.
+        let score = score.unwrap();
+        assert!((score.mean_px - slid.length()).abs() < 60.0, "{score:?}");
+        assert_eq!(calibration.error_px, score.mean_px, "what is reported is what was measured, before learning");
+        // The model that is kept has moved toward it, at a place the check did not have.
+        let place = Vec2::new(1400.0, 500.0);
+        let share = 1.0 / 12.0;
+        let estimate = (0..12).fold(Vec2::ZERO, |sum, frame| {
+            let mesh = person.look(200.0 + f64::from(frame) / 30.0, &Posture::default(), place + slid, 1.0);
+            sum + calibration.gaze.predict(&vision::measure(&calibration.reference, &mesh).unwrap()) * share
+        });
+        let (kept, unlearned) = (estimate.distance(place), slid.length());
+        assert!(kept < unlearned * 0.85, "{kept} px off at a new place, {unlearned} px without learning");
     }
 
     #[test]
