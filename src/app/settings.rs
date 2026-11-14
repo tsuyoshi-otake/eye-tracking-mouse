@@ -134,11 +134,13 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
     let word = pointing_word(mode);
     let mut changed = String::with_capacity(text.len() + 32);
     let mut found = false;
-    for raw in text.split_inclusive('\n') {
+    // A byte-order mark in front of the first line is not part of it, as in `parse`.
+    let lines = text.trim_start_matches('\u{feff}');
+    changed.push_str(&text[..text.len() - lines.len()]);
+    for raw in lines.split_inclusive('\n') {
         let body = raw.trim_end_matches(['\r', '\n']);
         let (setting, comment) = body.split_at(body.find('#').unwrap_or(body.len()));
-        // What stands before the name: spaces, or the byte-order mark of the first line.
-        let name_at = setting.len() - setting.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}').len();
+        let name_at = setting.len() - setting.trim_start().len();
         if setting[name_at..].split_once('=').is_some_and(|(name, _)| name.trim() == "pointing") {
             found = true;
             let gap = if comment.is_empty() { "" } else { " " };
@@ -284,13 +286,20 @@ mod tests {
         assert_eq!(with_pointing("", PointingMode::Head), "pointing = head\n");
 
         // Whatever the text was, reading the result gives the mode asked for and the rest as before.
-        for text in [template.as_str(), "camera = 1", "pointing = eye\npointing = head\ncamera = 3\n", "pointing = nonsense\n"] {
+        // A mark anywhere but at the very start makes a line `parse` cannot use: it is left
+        // alone and the setting goes on a line of its own.
+        let marked = "camera = 1\n\u{feff}pointing = head\n";
+        assert_eq!(with_pointing(marked, PointingMode::Eye), format!("{marked}pointing = eye\n"));
+        let texts = [template.as_str(), "camera = 1", "pointing = eye\npointing = head\ncamera = 3\n", "pointing = nonsense\n"];
+        for text in texts.into_iter().chain([marked, "  \u{feff}pointing = head\n", "\u{feff}\u{feff}pointing = head"]) {
             for mode in [PointingMode::Head, PointingMode::Eye] {
                 let (before, _) = parse(text);
                 let (after, warnings) = parse(&with_pointing(text, mode));
                 assert_eq!(after.tuning.pointing, mode, "{text:?}");
                 assert_eq!(after.camera, before.camera, "{text:?}");
-                assert!(warnings.is_empty(), "{text:?}: {warnings:?}");
+                // The line with a misplaced mark is still there, and still reported.
+                let unusable = text.contains("\n\u{feff}") || text.starts_with(' ');
+                assert_eq!(warnings.len(), usize::from(unusable), "{text:?}: {warnings:?}");
             }
         }
     }
