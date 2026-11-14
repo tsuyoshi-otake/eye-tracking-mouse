@@ -14,6 +14,13 @@
 //! carries that; without it the corners of the screen are missed by 200
 //! pixels and more.
 //!
+//! The same goes for the upper lid, which is the best sign of how far down
+//! the person looks: it follows the gaze over the lower half of a screen and
+//! hardly moves over the upper quarter (measured: -0.065 at the bottom row of
+//! a 5x5 grid, -0.16 in the middle, -0.19 and -0.20 in the two top rows). Its
+//! square lets the map bend there; on two runs of one person that took a fifth
+//! off the error at places the fit had not seen, nearly all of it vertical.
+//!
 //! Everything angular is multiplied by the distance relative to calibration
 //! (from the size of the face in the image), so leaning in or back keeps the
 //! estimate roughly right without needing calibration data at several distances.
@@ -22,7 +29,7 @@ use crate::geometry::{Vec2, solve_spd};
 use crate::vision::FaceMeasurement;
 
 /// Number of inputs to the linear map, including the constant.
-pub const FEATURES: usize = 11;
+pub const FEATURES: usize = 12;
 
 /// Typical ranges of the measurements. Dividing by them makes every input of
 /// order one, so the regularisation treats them alike.
@@ -98,6 +105,8 @@ fn features(face: &FaceMeasurement, neutral: &Neutral) -> [f64; FEATURES] {
         f64::from(shift.y) / SHIFT_UNIT,
         (distance - 1.0) / DISTANCE_UNIT,
         distance * f64::from(iris.x) / IRIS_UNIT * distance * f64::from(iris.y) / IRIS_UNIT,
+        // Not scaled by the distance: squared, that factor made leaning in cost more than the term gained.
+        (f64::from(face.eyes.lid) / IRIS_UNIT).powi(2),
     ]
 }
 
@@ -459,6 +468,58 @@ mod tests {
         for corner in [1, 3, 5, 7] {
             assert!(sideways(corner) < 100.0, "corner {corner} is missed sideways by {} px", sideways(corner));
         }
+    }
+
+    #[test]
+    fn the_lid_that_hardly_moves_over_the_top_of_the_screen_is_allowed_for() {
+        use crate::vision::eyes::EyeSignals;
+        use crate::vision::pose::HeadPose;
+        // A person's eye signals at the 25 places of the grid on a 2560x1080 screen (the middle
+        // of each place's frames): the place, then iris x, iris y and upper lid as shares of
+        // the eye's width. The lid is the same in the two top rows.
+        let measured = [
+            ((1280.0, 540.0), (-0.0154, -0.0424, -0.1542)),
+            ((77.0, 54.0), (0.1406, -0.0574, -0.1851)),
+            ((678.0, 54.0), (0.0674, -0.0639, -0.1978)),
+            ((1280.0, 54.0), (-0.0086, -0.0717, -0.2041)),
+            ((1881.0, 54.0), (-0.1081, -0.0607, -0.2039)),
+            ((2482.0, 54.0), (-0.1904, -0.0507, -0.1975)),
+            ((2482.0, 297.0), (-0.1780, -0.0485, -0.1958)),
+            ((1881.0, 297.0), (-0.1028, -0.0490, -0.1922)),
+            ((1280.0, 297.0), (-0.0089, -0.0583, -0.1771)),
+            ((678.0, 297.0), (0.0680, -0.0511, -0.1800)),
+            ((77.0, 297.0), (0.1313, -0.0487, -0.1833)),
+            ((77.0, 540.0), (0.1269, -0.0399, -0.1617)),
+            ((678.0, 540.0), (0.0641, -0.0423, -0.1586)),
+            ((1881.0, 540.0), (-0.0797, -0.0380, -0.1633)),
+            ((2482.0, 540.0), (-0.1682, -0.0321, -0.1726)),
+            ((2482.0, 782.0), (-0.1496, -0.0245, -0.1427)),
+            ((1881.0, 782.0), (-0.0877, -0.0215, -0.1261)),
+            ((1280.0, 782.0), (-0.0117, -0.0303, -0.1363)),
+            ((678.0, 782.0), (0.0572, -0.0294, -0.1189)),
+            ((77.0, 782.0), (0.1138, -0.0260, -0.1249)),
+            ((77.0, 1025.0), (0.1034, -0.0083, -0.0906)),
+            ((678.0, 1025.0), (0.0438, -0.0114, -0.0828)),
+            ((1280.0, 1025.0), (-0.0146, 0.0002, -0.0645)),
+            ((1881.0, 1025.0), (-0.0844, 0.0062, -0.0626)),
+            ((2482.0, 1025.0), (-0.1213, 0.0090, -0.0653)),
+        ];
+        let neutral = Neutral { frame_size: FRAME_SIZE, position: Vec2::new(745.0, 400.0), scale: 248.0 };
+        let face = |(x, y, lid): (f32, f32, f32)| FaceMeasurement {
+            time: 0.0,
+            pose: HeadPose { yaw: 0.0, pitch: 0.0, roll: 0.0, position: neutral.position, scale: neutral.scale },
+            eyes: EyeSignals { iris: Vec2::new(x, y), lid, openness: [0.3; 2] },
+        };
+        let samples: Vec<Sample> = measured
+            .iter()
+            .enumerate()
+            .flat_map(|(place, &((x, y), signals))| {
+                std::iter::repeat_n(Sample { face: face(signals), target: Vec2::new(x, y), place: Some(place) }, 6)
+            })
+            .collect();
+        // Each place predicted from the other 24. Without the lid's square this is 130 pixels and more.
+        let error = held_out_error(neutral, &samples).unwrap();
+        assert!(error < 118.0, "places the fit had not seen are missed by {error} px");
     }
 
     #[test]

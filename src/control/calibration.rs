@@ -119,7 +119,7 @@ fn place_share(place: usize) -> (f32, f32) {
     (COLUMNS[column], ROWS[row])
 }
 
-const HEADER: &str = "eye-tracking-mouse calibration 2";
+const HEADER: &str = "eye-tracking-mouse calibration 3";
 
 /// Everything learned about one person at one desk.
 #[derive(Clone, Debug, PartialEq)]
@@ -903,10 +903,10 @@ mod tests {
         let text = calibrated().to_text();
         let reason = |text: &str| Calibration::parse(text).unwrap_err().to_string();
         assert!(reason("").contains("this version"));
-        assert!(reason(&text.replace("calibration 2", "calibration 3")).contains("this version"));
+        assert!(reason(&text.replace("calibration 3", "calibration 4")).contains("this version"));
         assert!(reason(&text.replace("error_px", "error")).contains("'error_px' is missing"));
         assert!(reason(&format!("{text}area = 0 0 1 1\n")).contains("'area' appears twice"));
-        assert!(reason(&text.replace("weights_x = ", "weights_x = 1 ")).contains("needs 11 numbers but has 12"));
+        assert!(reason(&text.replace("weights_x = ", "weights_x = 1 ")).contains("needs 12 numbers but has 13"));
         assert!(reason(&text.replace("neutral = ", "neutral = x")).contains("not a number"));
         assert!(reason(&format!("{text}stray line\n")).contains("'name = numbers'"));
         let line = |name: &str| text.lines().find(|line| line.starts_with(name)).unwrap().to_string();
