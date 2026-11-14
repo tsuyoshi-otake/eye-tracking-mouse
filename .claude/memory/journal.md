@@ -96,7 +96,7 @@
 - Residual risk: Restart-Manager close of the running resident on upgrade is unexercised; the setup.exe is unsigned, so SmartScreen warns.
 - Pitfalls: MSYS mangles `/VERYSILENT`-style flags into `C:/Program Files/Git/...` paths -- drive the installer from PowerShell, not the Bash tool.
 
-## 2026-11-14 - A continuous eye-pointing mode (#3)
+## 2026-11-14 - A continuous eye-pointing mode (#3, a575e81, merged as PR #4 in 8b650aa)
 
 - Work: `pointing = head|eye` (default `head`, the behaviour so far). In `eye` the calibrated gaze estimate is the cursor position every frame: `control/eye_pointer.rs` (`EyePointer` = `OneEuro2` + `Backlash` from `control/filter.rs`), a `match` on `Tuning.pointing` in `Controller::step`, `eye_steadiness` (0.5 to 8, default 1.5). Looking past the calibrated screen holds the cursor; without a calibration eye mode points with the head. Blink click and the manual guard are shared by both modes. The work was handed over between agents at the WIP commit e2d44c0 with two tests failing.
 - Symptom: (1) `a_noisy_estimate_still_leaves_a_steady_eye_mode_cursor`: a resting gaze moved the cursor along 706 px in 2 s (limit 200). (2) `eye_mode_without_a_calibration_points_with_the_head`: a still head left the cursor at (1281, 539) instead of exactly (1280, 540).
