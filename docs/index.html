@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eye-tracking-mouse - 手を使わずにマウスを操作</title>
+<meta name="description" content="頭の動きでカーソルを動かし、長めのまばたきでクリック。ノートPCのカメラだけで動く、Windows 用の無料ソフトです。">
+<style>
+  :root {
+    --bg: #f4f7fa; --card: #ffffff; --text: #14283c; --muted: #4a5d70;
+    --accent: #0f8a73; --accent-text: #ffffff; --warn-bg: #fff4e5; --warn-line: #c4600a;
+    --line: #d5dde6; --code: #e9eef3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10161d; --card: #18212b; --text: #e8eef4; --muted: #a9b7c5;
+      --accent: #3cc9ad; --accent-text: #0b1a16; --warn-bg: #2e2215; --warn-line: #f0a050;
+      --line: #2c3a48; --code: #24303c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "BIZ UDPGothic", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    font-size: 19px; line-height: 1.8;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 2.1em; line-height: 1.3; margin: 0.4em 0 0.3em; }
+  h2 { font-size: 1.45em; margin: 2.2em 0 0.6em; padding-bottom: 0.2em; border-bottom: 3px solid var(--accent); }
+  h3 { font-size: 1.15em; margin: 1.6em 0 0.4em; }
+  p, li { max-width: 46em; }
+  a { color: var(--accent); }
+  .lead { font-size: 1.1em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; margin: 16px 0; }
+  .download {
+    display: inline-block; background: var(--accent); color: var(--accent-text);
+    font-size: 1.25em; font-weight: bold; text-decoration: none;
+    padding: 16px 28px; border-radius: 12px; margin: 8px 0;
+  }
+  .download:focus-visible, a:focus-visible { outline: 3px solid var(--warn-line); outline-offset: 3px; }
+  .small { color: var(--muted); font-size: 0.9em; }
+  .warn { background: var(--warn-bg); border-left: 6px solid var(--warn-line); border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  ol > li, ul > li { margin: 0.35em 0; }
+  kbd, code { background: var(--code); border-radius: 6px; padding: 1px 7px; font-family: inherit; }
+  img { max-width: 100%; height: auto; border-radius: 12px; display: block; margin: 14px 0; }
+  .yesno { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .yesno { grid-template-columns: 1fr; } body { font-size: 18px; } }
+  footer { margin-top: 48px; color: var(--muted); font-size: 0.9em; }
+</style>
+</head>
+<body>
+<main>
+
+<p class="small">Windows 用・無料・オープンソース・実験版</p>
+<h1>手を使わずに、マウスを操作する</h1>
+<p class="lead">頭の動きでカーソルを動かし、長めのまばたきでクリックします。専用の機器は要りません。ノートPCの内蔵カメラ(または USB カメラ)だけで動きます。</p>
+<p>体が不自由でマウスを使いにくい方や、その支援に関わる方に試していただきたくて作りました。</p>
+
+<p><a class="download" href="https://github.com/tsuyoshi-otake/eye-tracking-mouse/releases/download/v0.3.0/eye-tracking-mouse-v0.3.0-setup.exe">ダウンロード(無料・約5MB)</a></p>
+<p class="small">Windows 11(64ビット)用、v0.3.0。ほかの版は<a href="https://github.com/tsuyoshi-otake/eye-tracking-mouse/releases">リリースの一覧</a>にあります。</p>
+
+<div class="warn">
+  <strong>ダウンロードや起動のときに、警告が出ます。</strong>
+  このソフトには、まだ作者を証明する電子署名(コード署名)をしていないためです。ウイルスが見つかったという意味ではありません。
+  進め方は<a href="#warnings">「警告が出たとき」</a>にまとめました。
+</div>
+
+<h2 id="what">できること・まだできないこと</h2>
+<div class="yesno">
+  <div class="card">
+    <h3>できること</h3>
+    <ul>
+      <li>頭を少し動かすと、カーソルが動きます。</li>
+      <li>両目を約0.4秒閉じて開くと、左クリックになります。ふつうのまばたきや片目のウインクでは押されません。</li>
+      <li>動かし方の速さを、その人に合わせられます(約15秒)。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>まだできないこと</h3>
+    <ul>
+      <li>右クリック</li>
+      <li>ドラッグ</li>
+      <li>スクロール</li>
+      <li>ゲームの視点操作(FPS など)</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="need">必要なもの</h2>
+<ul>
+  <li>Windows 11 のパソコン(64ビット)</li>
+  <li>カメラ(ノートPCの内蔵カメラ、または USB カメラ)</li>
+  <li>費用はかかりません。</li>
+  <li>カメラの映像は、そのパソコンの中だけで処理してすぐ捨てます。保存も送信もしません。</li>
+</ul>
+
+<h2 id="install">インストールのしかた(約3分)</h2>
+<p>キーボードとマウスを少し使います。ご本人が難しいときは、支援者の方が代わりに行ってください。</p>
+<ol>
+  <li>上の<strong>「ダウンロード」</strong>ボタンを押します。</li>
+  <li>Edge で「一般的にダウンロードされていません」と出たら、<a href="#edge">Edge の手順</a>で保存します。</li>
+  <li>ダウンロードしたファイル(<code>eye-tracking-mouse-v0.3.0-setup.exe</code>)を開きます。ブラウザーのダウンロード一覧か、エクスプローラーの「ダウンロード」フォルダーにあります。</li>
+  <li>青い画面で「Windows によって PC が保護されました」と出たら、<a href="#smartscreen">青い画面の手順</a>で進めます。</li>
+  <li>画面の案内に沿って進めます。
+    <ul>
+      <li>ライセンスの画面: 「同意する」を選んで「次へ」</li>
+      <li>インストール先: そのまま「次へ」(管理者のパスワードは求められません)</li>
+      <li>デスクトップのアイコン: 必要ならチェックを入れて「次へ」</li>
+      <li>「インストール」を押す</li>
+    </ul>
+  </li>
+  <li>最後の画面で「eye-tracking-mouse を起動する」にチェックが入ったまま「完了」を押します。</li>
+</ol>
+
+<h2 id="warnings">警告が出たとき</h2>
+<p>Windows や Edge は、作者を確かめられないファイルや、ダウンロードした人がまだ少ないファイルに警告を出します。このソフトはまだ電子署名(有料の証明書が必要です)をしていないので、この警告が出ます。プログラムの中身(ソースコード)は<a href="https://github.com/tsuyoshi-otake/eye-tracking-mouse">GitHub</a>ですべて公開しています。不安なときは、無理に進めずに、詳しい方に相談してください。</p>
+
+<h3 id="edge">Edge でダウンロードが止まったとき</h3>
+<p>ダウンロード一覧に「〜は一般的にダウンロードされていません。開く前に信頼できることを確認してください」のように出て、ファイルが開けないことがあります。</p>
+<ol>
+  <li>ダウンロード一覧で、そのファイルの上にマウスを置き、右に出る「…」(その他のアクション)を押します。</li>
+  <li>「保存」(表示によっては「保持する」)を押します。</li>
+  <li>確認の画面が出たら、「詳細表示」(または「もっと見る」)を押し、「保持する」(または「それでも保持する」)を押します。</li>
+</ol>
+<p class="small">Edge の版によって、ボタンの名前が少しちがうことがあります。Chrome で似た警告が出たときも、同じように「保存」や「保持」を選びます。</p>
+
+<h3 id="smartscreen">「Windows によって PC が保護されました」と出たとき</h3>
+<p>ファイルを開くと、青い画面に「Microsoft Defender SmartScreen は認識されないアプリの起動を停止しました」と出ることがあります。「実行しない」しか見えませんが、次の手順で進めます。</p>
+<ol>
+  <li>文章の中の<strong>「詳細情報」</strong>を押します。</li>
+  <li>「発行元: 不明な発行元」と表示されます。電子署名がないためで、ふつうのことです。</li>
+  <li>下に出てくる<strong>「実行」</strong>を押します。</li>
+</ol>
+<p class="small">この画面が出るのは、最初に開くときだけです。</p>
+
+<h2 id="start">使いはじめる(約5分)</h2>
+<div class="card">
+  <h3>このソフトには、開くウィンドウがありません</h3>
+  <p>動いている間は、画面右下(時計のそば)の<strong>「タスクトレイ」</strong>(通知領域)に、目の形の小さなアイコンがあるだけです。起動すると「eye-tracking-mouse を開始しました」と通知が出ます。</p>
+  <ul>
+    <li>アイコンが見えないときは、時計の左にある上向きの矢印 <kbd>^</kbd> を押します。隠れているアイコンが並びます。</li>
+    <li>アイコンを<strong>右クリック</strong>するとメニューが出ます。一時停止、頭のキャリブレーション、終了はここから選べます。</li>
+    <li>あとから起動するときは、スタートメニューの「eye-tracking-mouse」を選びます。</li>
+  </ul>
+</div>
+<ol>
+  <li>カメラの正面に座ります。</li>
+  <li><kbd>Ctrl</kbd> と <kbd>Alt</kbd> を押しながら <kbd>H</kbd> を押します(タスクトレイのメニューの「頭のキャリブレーション」でも同じです)。</li>
+  <li>画面の案内に従って、中央を3秒見たあと、左・右・上・下の点へ、楽に向けられるところまで顔を向けます(約15秒)。カーソルの速さが、その人に合います。</li>
+  <li>頭を動かしてカーソルを動かし、両目を約0.4秒閉じて開いて、クリックしてみてください。</li>
+</ol>
+
+<h3>困ったとき</h3>
+<ul>
+  <li><strong>カーソルを止めたい</strong>: 実際のマウスを動かすと、すぐに手を放します。<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> で一時停止もできます。</li>
+  <li><strong>速すぎる・遅すぎる</strong>: もう一度 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> で合わせ直します。</li>
+  <li><strong>毎回自動で起動したい</strong>: <kbd>Windows</kbd>+<kbd>R</kbd> で <code>shell:startup</code> と入力して開き、スタートメニューの eye-tracking-mouse のショートカットをそこへコピーします。</li>
+  <li><strong>終わりたい</strong>: タスクトレイのアイコンを右クリックして「終了」、または <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Q</kbd>。</li>
+  <li><strong>削除したい</strong>: Windows の「設定」→「アプリ」→「インストールされているアプリ」で eye-tracking-mouse を選び、「アンインストール」。</li>
+</ul>
+
+<h2 id="how">しくみ</h2>
+<img src="how-it-works-1.png" width="1080" height="396" alt="ステップ1、カメラが顔を映す。ノートPCの内蔵カメラやUSBカメラだけで動きます。赤外線センサーや専用の視線計測器は使いません。">
+<img src="how-it-works-2.png" width="1080" height="396" alt="ステップ2、顔の478点を検出。顔ランドマークモデル(MediaPipe Face Mesh V2)をWindows標準のWindows MLで動かしています。">
+<img src="how-it-works-3.png" width="1080" height="396" alt="ステップ3、頭の向きをカーソルに。鼻先が向く方向を追います。ゆっくり動かすと精密に、すばやく動かすと大きく移動。静止中の震えは抑えます。">
+<img src="how-it-works-4.png" width="1080" height="396" alt="ステップ4、その人の動きに合わせる。約15秒のキャリブレーションで、無理なく動かせる範囲に合わせてカーソルの速さと安定度を決めます。">
+<img src="how-it-works-5.png" width="1080" height="396" alt="ステップ5、クリックは長めのまばたき。両目を約0.4秒閉じて開くと左クリック。ふつうのまばたきや片目のウインクには反応しません。">
+
+<h3>頭で動かす方式と、視線で動かす方式</h3>
+<p>最初は頭で動かす方式になっています。画面のカーソルを見ながら少しずつ合わせられるので、小さなボタンもねらえます。視線で動かす方式も選べますが、実測で平均約100ピクセル(角度で約3度)ずれるため、小さなボタンには向きません。</p>
+<img src="head-and-gaze-pointing.png" width="2160" height="2160" alt="頭で動かす方式と視線で動かす方式のちがい。頭で動かす方式は、カーソルを見ながら大きく動かしてから細かく合わせられるので、幅80ピクセルのOKボタンにも少しずつ寄せられます。視線で動かす方式は、見ている場所の推定が実測で平均約100ピクセル(角度で約3度)ずれるため、推定位置がOKボタンのまわりに散らばり、小さなボタンには向きません。視線の値は、1人が幅80cm・2560×1080の画面とノートPCのカメラで測ったものです。">
+
+<h2 id="notes">ご注意</h2>
+<ul>
+  <li>まだ実験版です。試したのは開発者1人だけです。大事な作業の前には、マウスやキーボードでも操作できるようにしておいてください。</li>
+  <li>無料で、個人でも、病院・施設・学校・会社でも使えます(<a href="https://github.com/tsuyoshi-otake/eye-tracking-mouse/blob/main/LICENSE">Apache License 2.0</a>)。無保証です。</li>
+</ul>
+
+<h2 id="feedback">感想を聞かせてください</h2>
+<p>「この動きができない」「この姿勢だと使えない」といった声が、改良にいちばん役立ちます。<a href="https://github.com/tsuyoshi-otake/eye-tracking-mouse/issues">GitHub の Issues</a> に書いてください(GitHub のアカウントが必要です)。</p>
+
+<footer>
+  <p>eye-tracking-mouse v0.3.0 ・ <a href="https://github.com/tsuyoshi-otake/eye-tracking-mouse">ソースコードと詳しい説明(GitHub)</a></p>
+</footer>
+
+</main>
+</body>
+</html>
