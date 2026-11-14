@@ -5,7 +5,7 @@
 //! pulled to the nearest allowed value, also with a warning. Warnings are
 //! shown to the person, so they are written in Japanese like the file itself.
 
-use crate::control::controller::Tuning;
+use crate::control::controller::{PointingMode, Tuning};
 
 /// The highest camera index accepted (a position in `--list-cameras`).
 const MAX_CAMERA: usize = 31;
@@ -26,17 +26,21 @@ enum Slot<'a> {
     Camera(&'a mut usize),
     Switch(&'a mut bool),
     Number(&'a mut f32, f32, f32),
+    /// `head` or `eye`.
+    Pointing(&'a mut PointingMode),
 }
 
 fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
     let tuning = &mut settings.tuning;
     Some(match name {
         "camera" => Slot::Camera(&mut settings.camera),
+        "pointing" => Slot::Pointing(&mut tuning.pointing),
         "gaze_jump" => Slot::Switch(&mut tuning.gaze_jump),
         "blink_click" => Slot::Switch(&mut tuning.blink_click),
         "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, 50.0, 5000.0),
         "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
         "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
+        "eye_steadiness" => Slot::Number(&mut tuning.eye_steadiness, 0.5, 8.0),
         "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
         "blink_hold" => Slot::Number(&mut tuning.blink.hold, 0.15, 3.0),
         "blink_limit" => Slot::Number(&mut tuning.blink.limit, 0.45, 10.0),
@@ -74,6 +78,11 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             Some(Slot::Switch(target)) => match switch(value) {
                 Some(on) => *target = on,
                 None => warnings.push(format!("{place}: {name} は on か off で指定してください")),
+            },
+            Some(Slot::Pointing(target)) => match value.to_ascii_lowercase().as_str() {
+                "head" => *target = PointingMode::Head,
+                "eye" => *target = PointingMode::Eye,
+                _ => warnings.push(format!("{place}: {name} は head か eye で指定してください")),
             },
             Some(Slot::Number(target, low, high)) => match value.parse::<f32>() {
                 Ok(number) if number.is_finite() => {
@@ -123,7 +132,14 @@ pub fn template() -> String {
 # 使うカメラの番号（eye-tracking-mouse --list-cameras で確認できます）
 camera = {camera}
 
+# カーソルを動かすもの: head / eye
+# head: 頭の動きで動かし、遠くを見ると視線ジャンプで飛ぶ（既定）
+# eye: 視線がそのままカーソルの位置になる、連続追従の eye tracking。
+#      キャリブレーション済みの画面でのみ動き、未実施なら head と同じ動作です。
+pointing = {pointing}
+
 # 視線ジャンプ（見た場所へカーソルが飛ぶ）: on / off
+# pointing = eye では使いません（視線が常にカーソルの位置になるため）。
 gaze_jump = {gaze_jump}
 
 # 長いまばたきで左クリック: on / off
@@ -137,6 +153,10 @@ head_speed_fast = {fast}
 # カーソルの安定度（0.5〜8、大きいほど止まっているときに震えず、動き出しは少し遅くなる）
 head_steadiness = {steadiness}
 
+# pointing = eye のときの視線カーソルの安定度（0.5〜8）
+# 大きいほど見つめている場所でカーソルが震えず、視線を移したときの追従は少し遅くなります。
+eye_steadiness = {eye_steadiness}
+
 # 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
 # これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
 jump_distance = {jump}
@@ -148,11 +168,16 @@ blink_limit = {limit}
 # 目を「閉じた」とみなす開き具合（ふだんの開きに対する割合、0.2〜0.8）
 blink_closed = {closed}
 ",
+        pointing = match tuning.pointing {
+            PointingMode::Head => "head",
+            PointingMode::Eye => "eye",
+        },
         gaze_jump = on_off(tuning.gaze_jump),
         blink_click = on_off(tuning.blink_click),
         slow = tuning.head_gain.slow,
         fast = tuning.head_gain.fast,
         steadiness = tuning.head_gain.steadiness,
+        eye_steadiness = tuning.eye_steadiness,
         jump = tuning.jump_distance,
         hold = tuning.blink.hold,
         limit = tuning.blink.limit,
@@ -170,7 +195,7 @@ mod tests {
         assert_eq!(settings, Settings::default());
         assert_eq!(warnings, Vec::<String>::new());
         // Every setting is offered in the template.
-        let names = ["camera", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "jump_distance"];
+        let names = ["camera", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "jump_distance"];
         for name in names.into_iter().chain(["blink_hold", "blink_limit", "blink_closed"]) {
             assert!(slot(&mut Settings::default(), name).is_some(), "{name}");
             assert!(template().contains(&format!("\n{name} = ")), "{name}");
@@ -190,6 +215,19 @@ mod tests {
         assert_eq!(tuning.jump_distance, 300.0);
         assert_eq!((tuning.blink.hold, tuning.blink.limit, tuning.blink.closed_ratio), (0.6, 2.0, 0.4));
         assert!((tuning.blink.open_ratio - 0.5).abs() < 1e-6, "the open share follows the shut share");
+    }
+
+    #[test]
+    fn the_pointing_mode_accepts_head_and_eye_and_rejects_anything_else() {
+        let (settings, warnings) = parse("pointing = eye\neye_steadiness = 3\n");
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(settings.tuning.pointing, PointingMode::Eye);
+        assert_eq!(settings.tuning.eye_steadiness, 3.0);
+        let (settings, warnings) = parse("pointing = HEAD\n");
+        assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Head, 0));
+        let (settings, warnings) = parse("pointing = gaze\n");
+        assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Head, 1));
+        assert!(warnings[0].contains("head か eye"), "{}", warnings[0]);
     }
 
     #[test]

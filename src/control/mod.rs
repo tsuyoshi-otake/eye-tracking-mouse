@@ -3,6 +3,7 @@
 pub mod blink;
 pub mod calibration;
 pub mod controller;
+pub mod eye_pointer;
 pub mod filter;
 pub mod fixation;
 pub mod gaze;

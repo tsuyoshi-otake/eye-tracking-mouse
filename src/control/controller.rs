@@ -17,6 +17,7 @@ use crate::vision::FaceMeasurement;
 
 use super::blink::{BlinkClicker, BlinkEvent, BlinkSettings};
 use super::calibration::Calibration;
+use super::eye_pointer::EyePointer;
 use super::fixation::FixationDetector;
 use super::guard::{ManualGuard, Verdict};
 use super::head_pointer::{HeadGain, HeadPointer};
@@ -32,14 +33,30 @@ const NEW_PLACE_SHARE: f32 = 0.8;
 /// A gaze estimate up to this share of the screen's size beyond its edge still means the edge.
 const EDGE_MARGIN: f32 = 0.15;
 
+/// What moves the cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointingMode {
+    /// Small head movements nudge the cursor; a gaze rest jumps it to where the person looks.
+    #[default]
+    Head,
+    /// The eyes move the cursor directly: every frame's gaze estimate is where
+    /// it sits. Needs a calibration; without one the head carries pointing.
+    Eye,
+}
+
 /// What the person can adjust.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
-    /// Jump the cursor to where the person looks.
+    /// Head or eyes.
+    pub pointing: PointingMode,
+    /// Jump the cursor to where the person looks. Only in head mode: in eye
+    /// mode every frame's estimate is already where the cursor is.
     pub gaze_jump: bool,
     /// Click with a long blink.
     pub blink_click: bool,
     pub head_gain: HeadGain,
+    /// How firmly the gaze-driven cursor is held in eye mode, like `head_gain`'s steadiness.
+    pub eye_steadiness: f32,
     /// The gaze moves the cursor only when it rests at least this many pixels away from it.
     pub jump_distance: f32,
     pub blink: BlinkSettings,
@@ -48,9 +65,11 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
+            pointing: PointingMode::Head,
             gaze_jump: true,
             blink_click: true,
             head_gain: HeadGain { slow: 700.0, fast: 2200.0, steadiness: 2.0 },
+            eye_steadiness: 1.5,
             jump_distance: 250.0,
             blink: BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.6 },
         }
@@ -106,6 +125,7 @@ pub struct Decision {
 pub struct Controller {
     guard: ManualGuard,
     head: HeadPointer,
+    eye: EyePointer,
     blink: BlinkClicker,
     fixation: FixationDetector,
     /// Where the cursor should be, finer than a pixel. `None` until it is taken over from the system.
@@ -141,6 +161,7 @@ impl Controller {
     fn suspend(&mut self, time: f64, tuning: &Tuning) -> Option<Sound> {
         let sound = sound_for(self.blink.step(time, None, &tuning.blink)).filter(|_| tuning.blink_click);
         self.head.reset();
+        self.eye.reset();
         self.fixation.reset();
         self.trail.clear();
         self.anchor = None;
@@ -188,13 +209,28 @@ impl Controller {
         }
 
         if !closed && time >= self.steady_from {
-            position = position + self.head.step(time, &face.pose, &tuning.head_gain);
-            if let Some(calibration) = frame.calibration.filter(|_| tuning.gaze_jump) {
-                let rest = self.fixation.step(time, calibration.gaze.predict(face), tuning.jump_distance * NEW_PLACE_SHARE);
-                let place = rest.and_then(|place| landing(calibration.area, place));
-                if let Some(place) = place.filter(|place| place.distance(position) >= tuning.jump_distance) {
-                    position = place;
+            match tuning.pointing {
+                PointingMode::Head => {
+                    position = position + self.head.step(time, &face.pose, &tuning.head_gain);
+                    if let Some(calibration) = frame.calibration.filter(|_| tuning.gaze_jump) {
+                        let rest = self.fixation.step(time, calibration.gaze.predict(face), tuning.jump_distance * NEW_PLACE_SHARE);
+                        let place = rest.and_then(|place| landing(calibration.area, place));
+                        if let Some(place) = place.filter(|place| place.distance(position) >= tuning.jump_distance) {
+                            position = place;
+                        }
+                    }
                 }
+                PointingMode::Eye => match frame.calibration {
+                    // The estimate is the position, kept on the calibrated
+                    // screen. Looking past it holds the cursor where it is.
+                    Some(calibration) => {
+                        if let Some(place) = landing(calibration.area, calibration.gaze.predict(face)) {
+                            position = self.eye.step(time, place, tuning.eye_steadiness);
+                        }
+                    }
+                    // No calibration yet: the head carries pointing until there is one.
+                    None => position = position + self.head.step(time, &face.pose, &tuning.head_gain),
+                },
             }
             self.trail.push_back((time, position));
             while self.trail.front().is_some_and(|&(then, _)| time - then > REWIND) {
@@ -584,5 +620,83 @@ mod tests {
         assert_eq!(landing(area, Vec2::new(2700.0, 1100.0)), Some(Vec2::new(2559.0, 1079.0)));
         assert_eq!(landing(area, Vec2::new(-100.0, 300.0)), Some(Vec2::new(0.0, 300.0)));
         assert_eq!(landing(area, Vec2::new(1000.0, 500.0)), Some(Vec2::new(1000.0, 500.0)));
+    }
+
+    /// Feeds the desk frames of the person looking at `target`, without a calibration.
+    fn look_uncalibrated(sitter: &mut Sitter, desk: &mut Desk, frames: u32, posture: &Posture, target: Vec2) {
+        for _ in 0..frames {
+            let mesh = sitter.person.look(desk.time(), posture, target, 1.0);
+            desk.feed(vision::measure(&sitter.calibration.reference, &mesh), None);
+        }
+    }
+
+    #[test]
+    fn in_eye_mode_the_cursor_tracks_the_gaze_even_within_the_jump_distance() {
+        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+        desk.tuning.pointing = PointingMode::Eye;
+        // In head mode a look this close to the cursor moves nothing; in eye
+        // mode the estimate is the position, however near it is.
+        let near = Vec2::new(1450.0, 640.0);
+        sitter.look(&mut desk, 60, &Posture::default(), near, 1.0);
+        assert!(distance(desk.at(), near) < 120.0, "{:?}", desk.at());
+        let far = Vec2::new(2100.0, 250.0);
+        sitter.look(&mut desk, 60, &Posture::default(), far, 1.0);
+        assert!(distance(desk.at(), far) < 120.0, "{:?}", desk.at());
+    }
+
+    #[test]
+    fn eye_mode_without_a_calibration_points_with_the_head() {
+        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+        desk.tuning.pointing = PointingMode::Eye;
+        look_uncalibrated(&mut sitter, &mut desk, 30, &Posture::default(), Vec2::new(1280.0, 540.0));
+        assert_eq!(desk.at(), (1280, 540), "a still head moves nothing");
+        for step in 1..=20 {
+            look_uncalibrated(&mut sitter, &mut desk, 1, &Posture { yaw: 0.01 * step as f32, ..Posture::default() }, Vec2::new(1280.0, 540.0));
+        }
+        assert!(desk.at().0 < 1280 - 50, "the head still points while there is no calibration: {:?}", desk.at());
+    }
+
+    #[test]
+    fn the_blink_click_still_works_in_eye_mode() {
+        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+        desk.tuning.pointing = PointingMode::Eye;
+        let target = Vec2::new(1900.0, 400.0);
+        sitter.look(&mut desk, 60, &Posture::default(), target, 1.0);
+        let resting = desk.at();
+        assert!(distance(resting, target) < 120.0, "{resting:?}");
+        sitter.look(&mut desk, 15, &Posture::default(), target, 0.0);
+        sitter.look(&mut desk, 5, &Posture::default(), target, 1.0);
+        assert_eq!(desk.clicks.len(), 1);
+        assert!(distance(desk.clicks[0], Vec2::new(resting.0 as f32, resting.1 as f32)) < 20.0, "{:?} from {resting:?}", desk.clicks);
+    }
+
+    #[test]
+    fn a_noisy_estimate_still_leaves_a_steady_eye_mode_cursor() {
+        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+        desk.tuning.pointing = PointingMode::Eye;
+        let target = Vec2::new(900.0, 700.0);
+        sitter.look(&mut desk, 90, &Posture::default(), target, 1.0);
+        let mut path = 0.0;
+        for _ in 0..60 {
+            let before = Vec2::new(desk.at().0 as f32, desk.at().1 as f32);
+            sitter.look(&mut desk, 1, &Posture::default(), target, 1.0);
+            path += distance(desk.at(), before);
+        }
+        assert!(distance(desk.at(), target) < 120.0, "{:?}", desk.at());
+        assert!(path < 200.0, "a resting gaze rattles the cursor by {path} px over 2 s");
+    }
+
+    #[test]
+    fn the_hand_on_the_mouse_still_wins_in_eye_mode() {
+        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+        desk.tuning.pointing = PointingMode::Eye;
+        sitter.look(&mut desk, 45, &Posture::default(), Vec2::new(1280.0, 540.0), 1.0);
+        for step in 0..20 {
+            desk.cursor = Some((300 + step * 10, 200));
+            let mesh = sitter.person.look(desk.time(), &Posture::default(), Vec2::new(1280.0, 540.0), 1.0);
+            desk.feed(vision::measure(&sitter.calibration.reference, &mesh), Some(&sitter.calibration));
+            assert_eq!(desk.activity, Activity::Yielded);
+        }
+        assert_eq!(desk.at(), (490, 200));
     }
 }
