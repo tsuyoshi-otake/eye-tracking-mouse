@@ -4,7 +4,7 @@
 //! measures their face. Stages, each leading to the next or to a failure:
 //!
 //! ```text
-//! Rest --> Places (eight around the screen) --> Sweep --> Done
+//! Rest --> Places (a grid over the screen) --> Sweep --> Done
 //!   |          |                                  |
 //!   +----------+----------------------------------+--> Failed
 //! ```
@@ -34,7 +34,7 @@ const REST_SETTLE: f64 = 1.5;
 /// Frames averaged into the face shape.
 const REST_FRAMES: usize = 30;
 /// Seconds the eyes are given to reach a place that has just appeared.
-const TRAVEL: f64 = 0.8;
+const TRAVEL: f64 = 1.0;
 /// Frames recorded at each place.
 const PLACE_FRAMES: usize = 24;
 /// Shortest sweep, in seconds.
@@ -42,6 +42,10 @@ const SWEEP_SECONDS: f64 = 4.0;
 /// How far the head must turn during the sweep, sideways and vertically, as
 /// the change of its facing vector (0.2 is about 12 degrees from end to end).
 const SWEEP_TURN: Vec2 = Vec2::new(0.20, 0.12);
+/// Sweep frames with the head turned further than this from straight ahead (as the facing
+/// vector, about 12 degrees) stay out of the fit: nobody points with the head turned that far,
+/// and fitting them costs accuracy where the head usually is.
+const SWEEP_USED: f32 = 0.2;
 /// At most this many sweep frames go into the fit, so they do not outweigh the places.
 const SWEEP_FRAMES: usize = 150;
 /// A stage that has taken this many seconds has failed.
@@ -52,24 +56,38 @@ const FACE_LIMIT: f64 = 5.0;
 const BLINK_SHARE: f32 = 0.45;
 /// Resting lid gap, as a share of the eye's width, below which the eyes were not open during the rest stage.
 const MIN_OPEN_SIZE: f32 = 0.1;
+/// A frame belongs to a place while its eye signals are within this many typical
+/// deviations of the place's middle value...
+const SETTLED_SPREADS: f32 = 4.5;
+/// ...where a typical deviation is taken to be at least this share of the eye's
+/// width (a resting eye measured 0.002 to 0.004).
+const SETTLED_FLOOR: f32 = 0.003;
 /// A result whose held-out error exceeds this share of the screen's shorter side is refused.
 const MAX_ERROR_SHARE: f32 = 0.25;
 
-/// The places looked at, as shares of the screen's width and height: the
-/// middle, then clockwise around the edge from the top left.
-const PLACES: [(f32, f32); 9] = [
-    (0.5, 0.5),
-    (0.08, 0.08),
-    (0.5, 0.08),
-    (0.92, 0.08),
-    (0.92, 0.5),
-    (0.92, 0.92),
-    (0.5, 0.92),
-    (0.08, 0.92),
-    (0.08, 0.5),
-];
+/// The places looked at form a grid, given as shares of the screen's width and height.
+const COLUMNS: [f32; 5] = [0.06, 0.28, 0.5, 0.72, 0.94];
+const ROWS: [f32; 5] = [0.08, 0.29, 0.5, 0.71, 0.92];
+/// How many places there are: every crossing of the grid.
+const PLACES: usize = COLUMNS.len() * ROWS.len();
 
-const HEADER: &str = "eye-tracking-mouse calibration 1";
+/// Where place number `place` is, as shares of the screen's width and height. The first is
+/// the middle, where the eyes rest before and after; the others follow row by row from the
+/// top, back and forth, so the eyes never have far to go.
+fn place_share(place: usize) -> (f32, f32) {
+    let middle = (COLUMNS.len() / 2, ROWS.len() / 2);
+    let crossing = |step: usize| {
+        let (row, along) = (step / COLUMNS.len(), step % COLUMNS.len());
+        (if row % 2 == 0 { along } else { COLUMNS.len() - 1 - along }, row)
+    };
+    let (column, row) = match place {
+        0 => middle,
+        _ => (0..PLACES).map(crossing).filter(|&at| at != middle).nth(place - 1).unwrap_or(middle),
+    };
+    (COLUMNS[column], ROWS[row])
+}
+
+const HEADER: &str = "eye-tracking-mouse calibration 2";
 
 /// Everything learned about one person at one desk.
 #[derive(Clone, Debug, PartialEq)]
@@ -247,7 +265,7 @@ enum Stage {
 
 /// Where place number `place` is on the screen `area`, in desktop pixels.
 fn target(area: RectI, place: usize) -> (i32, i32) {
-    let (across, down) = PLACES[place];
+    let (across, down) = place_share(place);
     (
         area.left + (across * (area.width() - 1) as f32).round() as i32,
         area.top + (down * (area.height() - 1) as f32).round() as i32,
@@ -295,14 +313,14 @@ impl CalibrationSession {
             Stage::Sweep { low, high, .. } => {
                 let turned = ((high.x - low.x) / SWEEP_TURN.x).min((high.y - low.y) / SWEEP_TURN.y);
                 let waited = ((elapsed - TRAVEL) / SWEEP_SECONDS) as f32;
-                (Phase::Sweep, 0, PLACES.len(), turned.min(waited).clamp(0.0, 1.0))
+                (Phase::Sweep, 0, PLACES, turned.min(waited).clamp(0.0, 1.0))
             }
         };
         View {
             phase,
             target: target(self.area, place),
             dwell,
-            progress: (finished as f32 + dwell) / (PLACES.len() + 1) as f32,
+            progress: (finished as f32 + dwell) / (PLACES + 1) as f32,
             face_visible: self.face_visible,
         }
     }
@@ -347,7 +365,7 @@ impl CalibrationSession {
                 }
                 if recorded < PLACE_FRAMES {
                     self.stage = Stage::Places { basis, index, recorded };
-                } else if index + 1 < PLACES.len() {
+                } else if index + 1 < PLACES {
                     self.stage = Stage::Places { basis, index: index + 1, recorded: 0 };
                     self.stage_started = time;
                 } else {
@@ -375,8 +393,41 @@ impl CalibrationSession {
 
 }
 
+/// The middle value of `values`, which must not be empty.
+fn median(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    values[values.len() / 2]
+}
+
+/// The frames of each place in which the eyes rested on it: a frame whose eye
+/// signals are far from that place's usual ones was recorded while the eyes
+/// were still on their way, or half-way through a blink, and is left out.
+fn settled(samples: Vec<Sample>) -> Vec<Sample> {
+    let signals = |sample: &Sample| [sample.face.eyes.iris.x, sample.face.eyes.iris.y, sample.face.eyes.lid];
+    let mut bounds: HashMap<Option<usize>, [(f32, f32); 3]> = HashMap::new();
+    for place in samples.iter().map(|sample| sample.place) {
+        bounds.entry(place).or_insert_with(|| {
+            let inside: Vec<[f32; 3]> = samples.iter().filter(|sample| sample.place == place).map(signals).collect();
+            [0, 1, 2].map(|signal| {
+                let middle = median(inside.iter().map(|values| values[signal]).collect());
+                let spread = median(inside.iter().map(|values| (values[signal] - middle).abs()).collect());
+                (middle, SETTLED_SPREADS * spread.max(SETTLED_FLOOR))
+            })
+        });
+    }
+    samples
+        .into_iter()
+        .filter(|sample| {
+            let limits = &bounds[&sample.place];
+            signals(sample).iter().zip(limits).all(|(value, (middle, reach))| (value - middle).abs() <= *reach)
+        })
+        .collect()
+}
+
 /// Fits the model to everything recorded and decides whether it is good enough to keep.
-fn finish(area: RectI, mut samples: Vec<Sample>, basis: Basis, sweep: Vec<Sample>) -> Step {
+fn finish(area: RectI, samples: Vec<Sample>, basis: Basis, sweep: Vec<Sample>) -> Step {
+    let mut samples = settled(samples);
+    let sweep: Vec<Sample> = sweep.into_iter().filter(|sample| sample.face.pose.forward().length() <= SWEEP_USED).collect();
     let stride = sweep.len().div_ceil(SWEEP_FRAMES).max(1);
     samples.extend(sweep.into_iter().step_by(stride));
     let fitted = GazeModel::fit(basis.neutral, &samples).zip(held_out_error(basis.neutral, &samples));
@@ -493,7 +544,7 @@ mod tests {
         let mut person = Person::new(1.0);
         let (outcome, seconds) = run(&mut person, &Behaviour::default(), |_| ());
         let Step::Done(calibration) = outcome else { panic!("the routine should succeed") };
-        assert!((15.0..30.0).contains(&seconds), "took {seconds} s");
+        assert!((45.0..60.0).contains(&seconds), "took {seconds} s");
         assert!((15.0..90.0).contains(&calibration.error_px), "held-out error {} px", calibration.error_px);
         assert_eq!(calibration.area, SCREEN);
         // A place and a head position that were never shown.
@@ -509,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn the_middle_is_shown_first_then_eight_places_clockwise_then_the_middle_again() {
+    fn the_middle_is_shown_first_then_the_grid_row_by_row_back_and_forth_then_the_middle_again() {
         let mut targets: Vec<(Phase, (i32, i32))> = Vec::new();
         let mut progress = Vec::new();
         run(&mut Person::new(0.0), &Behaviour::default(), |view| {
@@ -519,9 +570,17 @@ mod tests {
             progress.push(view.progress);
             assert!((0.0..=1.0).contains(&view.dwell) && (0.0..=1.0).contains(&view.progress), "{view:?}");
         });
-        let places = [(205, 86), (1280, 86), (2354, 86), (2354, 540), (2354, 993), (1280, 993), (205, 993), (205, 540)];
+        // Five columns and five rows; the middle crossing is not shown a second time among them.
+        let (columns, rows) = ([154, 717, 1280, 1842, 2405], [86, 313, 540, 766, 993]);
         let mut expected = vec![(Phase::Rest, (1280, 540))];
-        expected.extend(places.map(|place| (Phase::Places, place)));
+        for (index, y) in rows.into_iter().enumerate() {
+            let mut row: Vec<(i32, i32)> = columns.iter().map(|&x| (x, y)).filter(|&place| place != (1280, 540)).collect();
+            if index % 2 == 1 {
+                row.reverse();
+            }
+            expected.extend(row.into_iter().map(|place| (Phase::Places, place)));
+        }
+        assert_eq!(expected.len(), PLACES);
         expected.push((Phase::Sweep, (1280, 540)));
         assert_eq!(targets, expected);
         assert!(progress.windows(2).all(|pair| pair[1] >= pair[0]), "progress never goes back");
@@ -538,7 +597,7 @@ mod tests {
     fn a_head_that_stays_still_in_the_sweep_fails_at_the_stage_limit() {
         let (failure, seconds) = failure(&Behaviour { sweeps: false, ..Behaviour::default() });
         assert_eq!(failure, Failure::HeadNotMoved);
-        assert!((35.0..45.0).contains(&seconds), "gave up after {seconds} s");
+        assert!((65.0..75.0).contains(&seconds), "gave up after {seconds} s");
     }
 
     #[test]
@@ -556,6 +615,37 @@ mod tests {
         run(&mut Person::new(0.0), &Behaviour { away: (6.0, 8.0), ..Behaviour::default() }, |view| seen.push(view.face_visible));
         // Frame 0 is shown before any frame was fed; frames 180..240 were fed without a face.
         assert!(seen[1..181].iter().all(|&visible| visible) && seen[181..241].iter().all(|&visible| !visible) && seen[241]);
+    }
+
+    #[test]
+    fn frames_recorded_before_the_eyes_had_arrived_or_during_a_blink_are_left_out_of_their_place() {
+        use crate::vision::eyes::EyeSignals;
+        use crate::vision::pose::HeadPose;
+        let sample = |place: usize, iris_x: f32, lid: f32| Sample {
+            face: FaceMeasurement {
+                time: 0.0,
+                pose: HeadPose { yaw: 0.0, pitch: 0.0, roll: 0.0, position: Vec2::new(640.0, 360.0), scale: 250.0 },
+                eyes: EyeSignals { iris: Vec2::new(iris_x, -0.03), lid, openness: [0.3; 2] },
+            },
+            target: Vec2::ZERO,
+            place: Some(place),
+        };
+        // Measured on a person: resting eyes scatter by about 0.004 of the eye's width, eyes
+        // still on their way are 0.03 and more off, and a blink drags the lid by 0.03 to 0.1.
+        let mut samples = Vec::new();
+        for frame in 0..24 {
+            let wobble = (frame % 5) as f32 * 0.002 - 0.004;
+            // Place 1: the first five frames come from the place before it.
+            samples.push(sample(1, if frame < 5 { 0.02 } else { -0.105 + wobble }, -0.13 + wobble * 0.5));
+            // Place 2: three frames in the middle are half-way through a blink.
+            samples.push(sample(2, 0.09 + wobble, if (10..13).contains(&frame) { -0.08 } else { -0.17 + wobble * 0.5 }));
+            // Place 3: nothing wrong with it.
+            samples.push(sample(3, wobble, -0.15 + wobble * 0.5));
+        }
+        let kept = settled(samples);
+        let count = |place: usize| kept.iter().filter(|sample| sample.place == Some(place)).count();
+        assert_eq!((count(1), count(2), count(3)), (19, 21, 24));
+        assert!(kept.iter().all(|sample| sample.face.eyes.iris.x != 0.02 && sample.face.eyes.lid != -0.08));
     }
 
     #[test]
@@ -584,10 +674,10 @@ mod tests {
         let text = calibrated().to_text();
         let reason = |text: &str| Calibration::parse(text).unwrap_err().to_string();
         assert!(reason("").contains("this version"));
-        assert!(reason(&text.replace("calibration 1", "calibration 2")).contains("this version"));
+        assert!(reason(&text.replace("calibration 2", "calibration 3")).contains("this version"));
         assert!(reason(&text.replace("error_px", "error")).contains("'error_px' is missing"));
         assert!(reason(&format!("{text}area = 0 0 1 1\n")).contains("'area' appears twice"));
-        assert!(reason(&text.replace("weights_x = ", "weights_x = 1 ")).contains("needs 10 numbers but has 11"));
+        assert!(reason(&text.replace("weights_x = ", "weights_x = 1 ")).contains("needs 11 numbers but has 12"));
         assert!(reason(&text.replace("neutral = ", "neutral = x")).contains("not a number"));
         assert!(reason(&format!("{text}stray line\n")).contains("'name = numbers'"));
         let line = |name: &str| text.lines().find(|line| line.starts_with(name)).unwrap().to_string();

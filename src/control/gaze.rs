@@ -7,6 +7,13 @@
 //! those measurements to pixels, fitted to frames recorded while the person
 //! looked at known places.
 //!
+//! One thing is not linear and gets an input of its own: how far the iris
+//! travels sideways for the same change of gaze depends on how far down the
+//! person looks (measured on a person: 0.27 eye widths across the top of a
+//! screen, 0.19 across its bottom). The product of the two iris signals
+//! carries that; without it the corners of the screen are missed by 200
+//! pixels and more.
+//!
 //! Everything angular is multiplied by the distance relative to calibration
 //! (from the size of the face in the image), so leaning in or back keeps the
 //! estimate roughly right without needing calibration data at several distances.
@@ -15,7 +22,7 @@ use crate::geometry::{Vec2, solve_spd};
 use crate::vision::FaceMeasurement;
 
 /// Number of inputs to the linear map, including the constant.
-pub const FEATURES: usize = 10;
+pub const FEATURES: usize = 11;
 
 /// Typical ranges of the measurements. Dividing by them makes every input of
 /// order one, so the regularisation treats them alike.
@@ -90,6 +97,7 @@ fn features(face: &FaceMeasurement, neutral: &Neutral) -> [f64; FEATURES] {
         f64::from(shift.x) / SHIFT_UNIT,
         f64::from(shift.y) / SHIFT_UNIT,
         (distance - 1.0) / DISTANCE_UNIT,
+        distance * f64::from(iris.x) / IRIS_UNIT * distance * f64::from(iris.y) / IRIS_UNIT,
     ]
 }
 
@@ -307,12 +315,12 @@ mod tests {
             vision::measure(&self.reference, &mesh).unwrap()
         }
 
-        /// Nine places looked at with the head following a little, then the
-        /// middle looked at while the head turns and shifts.
+        /// A grid of five by five places looked at with the head following a
+        /// little, then the middle looked at while the head turns and shifts.
         fn calibration_samples(&mut self) -> Vec<Sample> {
             let mut samples = Vec::new();
-            for place in 0..9 {
-                let target = Vec2::new(205.0 + (place % 3) as f32 * 1075.0, 86.0 + (place / 3) as f32 * 454.0);
+            for place in 0..25 {
+                let target = Vec2::new(154.0 + (place % 5) as f32 * 562.75, 86.0 + (place / 5) as f32 * 226.75);
                 let follow = Posture {
                     yaw: -(target.x - CENTRE.x) * 6e-5,
                     pitch: (target.y - CENTRE.y) * 6e-5,
@@ -412,6 +420,45 @@ mod tests {
         }
         let careless = held_out_error(bench.neutral, &samples).unwrap();
         assert!(honest < 60.0 && careless > 400.0, "honest {honest} careless {careless}");
+    }
+
+    #[test]
+    fn the_iris_travelling_less_sideways_when_looking_down_does_not_cost_the_corners() {
+        use crate::vision::eyes::EyeSignals;
+        use crate::vision::pose::HeadPose;
+        // A person's eye signals at nine places of a 2560x1080 screen, head still: the place,
+        // then iris x, iris y and upper lid as shares of the eye's width. The iris covers 0.27
+        // across the top row and 0.19 across the bottom one.
+        let measured = [
+            ((1280.0, 540.0), (-0.0086, -0.0475, -0.1464)),
+            ((205.0, 86.0), (0.1169, -0.0688, -0.2027)),
+            ((1280.0, 86.0), (-0.0003, -0.0722, -0.1924)),
+            ((2354.0, 86.0), (-0.1487, -0.0567, -0.1984)),
+            ((2354.0, 540.0), (-0.1340, -0.0437, -0.1652)),
+            ((2354.0, 993.0), (-0.1075, -0.0218, -0.1307)),
+            ((1280.0, 993.0), (-0.0074, -0.0277, -0.1170)),
+            ((205.0, 993.0), (0.0846, -0.0330, -0.1123)),
+            ((205.0, 540.0), (0.0975, -0.0550, -0.1760)),
+        ];
+        let neutral = Neutral { frame_size: FRAME_SIZE, position: Vec2::new(745.0, 400.0), scale: 248.0 };
+        let face = |(x, y, lid): (f32, f32, f32)| FaceMeasurement {
+            time: 0.0,
+            pose: HeadPose { yaw: 0.0, pitch: 0.0, roll: 0.0, position: neutral.position, scale: neutral.scale },
+            eyes: EyeSignals { iris: Vec2::new(x, y), lid, openness: [0.3; 2] },
+        };
+        let samples: Vec<Sample> = measured
+            .iter()
+            .enumerate()
+            .flat_map(|(place, &((x, y), signals))| {
+                std::iter::repeat_n(Sample { face: face(signals), target: Vec2::new(x, y), place: Some(place) }, 6)
+            })
+            .collect();
+        let model = GazeModel::fit(neutral, &samples).unwrap();
+        let sideways = |index: usize| (model.predict(&face(measured[index].1)).x - measured[index].0.0).abs();
+        // A map without the product of the iris signals misses the two bottom corners by 150 pixels and more.
+        for corner in [1, 3, 5, 7] {
+            assert!(sideways(corner) < 100.0, "corner {corner} is missed sideways by {} px", sideways(corner));
+        }
     }
 
     #[test]
