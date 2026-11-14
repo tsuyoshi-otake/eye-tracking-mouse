@@ -31,7 +31,7 @@ use crate::platform::window::{self, Event, Kind, Poster, Window};
 use super::calibration_screen::CalibrationScreen;
 use super::icon::{self, Look};
 use super::log::Log;
-use super::pipeline::{CalibrationProblem, Notice, Pipeline, Setup, Status};
+use super::pipeline::{CalibrationProblem, Notice, Pipeline, Routine, Setup, Status};
 use super::preview::PreviewWindow;
 use super::settings;
 use super::storage::Storage;
@@ -60,16 +60,29 @@ const CAMERA_SILENT: &str = "the camera sends no pictures";
 pub enum Action {
     Pause = 1,
     Calibrate,
+    /// Check the calibration there is and add what the check finds to it.
+    Check,
     Preview,
-    /// Switches between pointing with the head and with the eyes.
-    Pointing,
+    /// What moves the cursor: the head, the eyes, or the eyes with the head correcting.
+    PointHead,
+    PointEye,
+    PointHybrid,
     Settings,
     Quit,
 }
 
 impl Action {
-    const ALL: [Action; 6] =
-        [Action::Pause, Action::Calibrate, Action::Preview, Action::Pointing, Action::Settings, Action::Quit];
+    const ALL: [Action; 9] = [
+        Action::Pause,
+        Action::Calibrate,
+        Action::Check,
+        Action::Preview,
+        Action::PointHead,
+        Action::PointEye,
+        Action::PointHybrid,
+        Action::Settings,
+        Action::Quit,
+    ];
 
     fn from_id(id: u32) -> Option<Action> {
         Action::ALL.into_iter().find(|&action| action as u32 == id)
@@ -77,7 +90,8 @@ impl Action {
 }
 
 /// Ctrl+Alt+letter for the actions that have a hotkey.
-const HOTKEYS: [(Action, char); 3] = [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Quit, 'Q')];
+const HOTKEYS: [(Action, char); 4] =
+    [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Check, 'T'), (Action::Quit, 'Q')];
 
 #[derive(PartialEq, Eq)]
 enum Flow {
@@ -153,6 +167,7 @@ fn screen_under_pointer() -> Result<RectI> {
 /// A calibration run, by the number the worker knows it by, and the page that shows it.
 struct Run {
     number: u32,
+    routine: Routine,
     page: CalibrationScreen,
 }
 
@@ -193,7 +208,8 @@ impl App {
         log.line(&format!("camera {}", camera.device_index));
         let poster = Poster::new(window, FROM_WORKER);
         let pointing = settings.tuning.pointing;
-        let setup = Setup { camera, tuning: settings.tuning, storage: storage.clone() };
+        let (record_calibration, record_pointing) = (settings.record_calibration, settings.record_pointing);
+        let setup = Setup { camera, tuning: settings.tuning, storage: storage.clone(), record_calibration, record_pointing };
         let pipeline = Pipeline::start(setup, move || {
             poster.post();
         })?;
@@ -271,14 +287,24 @@ impl App {
 
     fn menu(&self) -> Vec<MenuItem<'static>> {
         let pause = if self.pipeline.is_paused() { wording::MENU_RESUME } else { wording::MENU_PAUSE };
-        let calibrate = if self.calibration.is_some() { wording::MENU_CALIBRATE_STOP } else { wording::MENU_CALIBRATE };
+        let running = self.calibration.as_ref().map(|run| run.routine);
+        // While one of the two runs, either entry ends it, and says so.
+        let (calibrate, check) = match running {
+            Some(Routine::Calibration) => (wording::MENU_CALIBRATE_STOP, wording::MENU_CALIBRATE_STOP_SHORT),
+            Some(Routine::Check) => (wording::MENU_CHECK_STOP_SHORT, wording::MENU_CHECK_STOP),
+            None => (wording::MENU_CALIBRATE, wording::MENU_CHECK),
+        };
         let item = |action: Action, label, checked| MenuItem::Action { id: action as u32, label, checked };
         vec![
             item(Action::Pause, pause, false),
             item(Action::Calibrate, calibrate, false),
+            item(Action::Check, check, false),
             item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
-            item(Action::Pointing, wording::MENU_EYE_POINTING, self.pointing == PointingMode::Eye),
+            item(Action::PointHead, wording::MENU_POINT_HEAD, self.pointing == PointingMode::Head),
+            item(Action::PointEye, wording::MENU_POINT_EYE, self.pointing == PointingMode::Eye),
+            item(Action::PointHybrid, wording::MENU_POINT_HYBRID, self.pointing == PointingMode::Hybrid),
+            MenuItem::Separator,
             item(Action::Settings, wording::MENU_SETTINGS, false),
             MenuItem::Separator,
             item(Action::Quit, wording::MENU_QUIT, false),
@@ -292,11 +318,15 @@ impl App {
                 self.pipeline.set_paused(paused);
                 self.log.line(if paused { "paused by the person" } else { "resumed by the person" });
             }
-            Some(Action::Calibrate) if self.calibration.is_some() => self.cancel_calibration(),
-            Some(Action::Calibrate) => self.start_calibration(),
+            // Whichever of the two is running, either key ends it: the page covers the screen.
+            Some(Action::Calibrate | Action::Check) if self.calibration.is_some() => self.cancel_calibration(),
+            Some(Action::Calibrate) => self.start_run(Routine::Calibration),
+            Some(Action::Check) => self.start_run(Routine::Check),
             Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
             Some(Action::Preview) => self.open_preview(),
-            Some(Action::Pointing) => self.switch_pointing(),
+            Some(Action::PointHead) => self.choose_pointing(PointingMode::Head),
+            Some(Action::PointEye) => self.choose_pointing(PointingMode::Eye),
+            Some(Action::PointHybrid) => self.choose_pointing(PointingMode::Hybrid),
             Some(Action::Settings) => self.open_settings(),
             Some(Action::Quit) => {
                 self.log.line("quit by the person");
@@ -307,20 +337,20 @@ impl App {
         Flow::Continue
     }
 
-    /// Hands pointing from the head to the eyes or back: at once for the worker, and in the
-    /// settings file for the next start. A choice that could not be written down still holds
-    /// until the program ends, and the person is told that it will not last.
-    fn switch_pointing(&mut self) {
-        let pointing = match self.pointing {
-            PointingMode::Head => PointingMode::Eye,
-            PointingMode::Eye => PointingMode::Head,
-        };
+    /// Hands pointing to what the person chose: at once for the worker, and in the settings
+    /// file for the next start. A choice that could not be written down still holds until the
+    /// program ends, and the person is told that it will not last. Choosing what is already
+    /// in use changes nothing.
+    fn choose_pointing(&mut self, pointing: PointingMode) {
+        if self.pointing == pointing {
+            return;
+        }
         self.pointing = pointing;
         self.pipeline.set_pointing(pointing);
         self.log.line(&format!("pointing set to {} by the person", settings::pointing_word(pointing)));
         match self.storage.save_pointing(pointing) {
             Err(error) => self.show(&wording::pointing_not_saved(error.message())),
-            Ok(()) if pointing == PointingMode::Eye && !self.storage.has_calibration() => {
+            Ok(()) if pointing != PointingMode::Head && !self.storage.has_calibration() => {
                 self.show(&wording::eye_pointing_needs_calibration());
             }
             Ok(()) => {}
@@ -340,7 +370,7 @@ impl App {
     }
 
     /// Opens the calibration page on the screen the pointer is on and starts a run for that screen.
-    fn start_calibration(&mut self) {
+    fn start_run(&mut self, routine: Routine) {
         if matches!(self.status, Status::Stopped(_)) {
             // Without the worker there is nothing to calibrate with; the person is told again why it is gone.
             if let Some(message) = wording::trouble(&self.status) {
@@ -353,10 +383,10 @@ impl App {
             .and_then(|area| CalibrationScreen::open(VIEW_CLASS, area, frames, now).map(|page| (area, page)));
         match opened {
             Ok((area, page)) => {
-                let number = self.pipeline.start_calibration(area);
+                let number = self.pipeline.start_run(routine, area);
                 let (left, top, width, height) = (area.left, area.top, area.width(), area.height());
-                self.log.line(&format!("calibration run {number} started for the screen at {left},{top} ({width}x{height})"));
-                self.calibration = Some(Run { number, page });
+                self.log.line(&format!("{routine:?} run {number} started for the screen at {left},{top} ({width}x{height})"));
+                self.calibration = Some(Run { number, routine, page });
             }
             Err(error) => self.show(&wording::window_not_opened(error.message())),
         }

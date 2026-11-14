@@ -1,10 +1,10 @@
 //! What the program says to the person, in one place. Everything here is Japanese.
 
-use crate::control::calibration::{Failure, Phase};
+use crate::control::calibration::{Failure, Phase, Score};
 use crate::control::controller::Activity;
 
 use super::engine::GazeProblem;
-use super::pipeline::{CalibrationProblem, Notice, Status};
+use super::pipeline::{CalibrationProblem, Notice, Routine, Status};
 
 pub const APP_NAME: &str = "eye-tracking-mouse";
 
@@ -55,9 +55,16 @@ pub const MENU_PAUSE: &str = "一時停止\tCtrl+Alt+P";
 pub const MENU_RESUME: &str = "再開\tCtrl+Alt+P";
 pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
 pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
+pub const MENU_CHECK: &str = "追加補正テスト\tCtrl+Alt+T";
+pub const MENU_CHECK_STOP: &str = "追加補正テストを中止\tCtrl+Alt+T";
+/// The other entry's key while a run is going: it ends that run too.
+pub const MENU_CALIBRATE_STOP_SHORT: &str = "キャリブレーションを中止\tCtrl+Alt+T";
+pub const MENU_CHECK_STOP_SHORT: &str = "追加補正テストを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
-/// Checked while the eyes move the cursor; unchecked, the head does.
-pub const MENU_EYE_POINTING: &str = "視線でカーソルを動かす（eye tracking）";
+/// What moves the cursor; the one in use is checked.
+pub const MENU_POINT_HEAD: &str = "頭で動かす（遠くを見るとジャンプ）";
+pub const MENU_POINT_EYE: &str = "視線で動かす（eye tracking）";
+pub const MENU_POINT_HYBRID: &str = "視線で動かし、頭で微調整（ハイブリッド）";
 pub const MENU_SETTINGS: &str = "設定ファイルを開く（再起動で反映）";
 pub const MENU_QUIT: &str = "終了\tCtrl+Alt+Q";
 
@@ -84,7 +91,7 @@ pub fn settings_not_opened(path: &str, reason: &str) -> Message {
     Message { title: "設定ファイルを開けません", text: format!("{path}（{reason}）"), warning: true }
 }
 
-/// Shown when eye pointing is chosen and there is no calibration for it to work with.
+/// Shown when pointing with the eyes is chosen and there is no calibration for it to work with.
 pub fn eye_pointing_needs_calibration() -> Message {
     Message {
         title: "キャリブレーションが必要です",
@@ -120,6 +127,8 @@ pub fn trouble(status: &Status) -> Option<Message> {
 }
 
 const RETRY: &str = "Ctrl+Alt+C でやり直せます。";
+/// After a run that failed: which key starts which run again.
+const RUN_AGAIN: &str = "キャリブレーションは Ctrl+Alt+C、追加補正テストは Ctrl+Alt+T でやり直せます。";
 
 /// Shown when a calibration run ended without a result.
 pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
@@ -138,20 +147,36 @@ pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
         CalibrationProblem::Camera(reason) => format!("カメラを使えません。（{reason}）"),
         CalibrationProblem::DisplayChanged => "途中で画面の構成が変わりました。".to_string(),
         CalibrationProblem::Paused => "一時停止したため中止しました。".to_string(),
+        CalibrationProblem::NotCalibrated => {
+            return Message {
+                title: "追加補正テストはまだできません",
+                text: "この画面とカメラのキャリブレーションがありません。先に Ctrl+Alt+C でキャリブレーションします。".to_string(),
+                warning: true,
+            };
+        }
     };
-    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RETRY}"), warning: true }
+    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RUN_AGAIN}"), warning: true }
 }
 
 pub fn notice(notice: &Notice) -> Message {
     match notice {
-        Notice::CalibrationDone { error_px, saved: Ok(()), .. } => Message {
+        Notice::CalibrationDone { routine: Routine::Calibration, error_px, saved: Ok(()), .. } => Message {
             title: "キャリブレーション完了",
-            text: format!("視線ジャンプが使えます（誤差の目安 約{error_px:.0}ピクセル）。"),
+            text: format!(
+                "視線が使えます（誤差の目安 約{error_px:.0}ピクセル）。Ctrl+Alt+T の追加補正テストで、やるたびに精度を上げられます。"
+            ),
+            warning: false,
+        },
+        Notice::CalibrationDone { routine: Routine::Check, error_px, saved: Ok(()), .. } => Message {
+            title: "追加補正しました",
+            text: format!(
+                "補正前のずれは平均 約{error_px:.0}ピクセルでした。この結果を補正に加えました。Ctrl+Alt+T でもう一度やると、さらに補正されます。"
+            ),
             warning: false,
         },
         Notice::CalibrationDone { saved: Err(reason), .. } => Message {
-            title: "キャリブレーション完了（保存に失敗）",
-            text: format!("終了するまでは使えますが、次回の起動時にはやり直しが必要です。（{reason}）"),
+            title: "完了（保存に失敗）",
+            text: format!("今回の結果は終了するまで使えますが、ファイルに保存できなかったので次回の起動時には残りません。（{reason}）"),
             warning: true,
         },
         Notice::CalibrationFailed { problem, .. } => calibration_failed(problem),
@@ -180,7 +205,13 @@ pub fn instruction(phase: Phase) -> &'static str {
         Phase::Rest => "中央の点を見つめて、頭を動かさずにお待ちください",
         Phase::Places => "頭は動かさず、目だけで点を追ってください",
         Phase::Sweep => "中央の点を見つめたまま、頭を上下左右にゆっくり回してください",
+        Phase::Check => "追加補正テスト：出てくる点を目で追ってください",
     }
+}
+
+/// The line that ends the check: how many of its places the model hit and how far off it was.
+pub fn check_score(score: Score) -> String {
+    format!("命中 {} / {}　　平均のずれ 約{:.0}ピクセル", score.hits, score.places, score.mean_px)
 }
 
 /// Shown when one of the program's own windows cannot be opened.
@@ -234,6 +265,7 @@ mod tests {
             CalibrationProblem::Routine(Failure::TooSlow),
             CalibrationProblem::Routine(Failure::HeadNotMoved),
             CalibrationProblem::Routine(Failure::Unusable),
+            CalibrationProblem::NotCalibrated,
             CalibrationProblem::Routine(Failure::Inaccurate { error_px: 1234.5 }),
             CalibrationProblem::Camera(reason()),
             CalibrationProblem::DisplayChanged,
@@ -241,8 +273,9 @@ mod tests {
         ];
         let mut notices: Vec<Notice> =
             problems.into_iter().map(|problem| Notice::CalibrationFailed { run: 1, problem }).collect();
-        notices.push(Notice::CalibrationDone { run: 1, error_px: 48.6, saved: Ok(()) });
-        notices.push(Notice::CalibrationDone { run: 1, error_px: 48.6, saved: Err(reason()) });
+        notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 48.6, saved: Ok(()) });
+        notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Check, error_px: 48.6, saved: Ok(()) });
+        notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 48.6, saved: Err(reason()) });
         notices.push(Notice::GazeUnavailable(GazeProblem::ScreenChanged));
         notices.push(Notice::GazeUnavailable(GazeProblem::CameraChanged));
         notices.push(Notice::CalibrationUnreadable(reason()));
@@ -269,7 +302,7 @@ mod tests {
         for quiet in [Status::Starting, Status::Paused, Status::Calibrating, Status::Pointing(Activity::NoFace)] {
             assert_eq!(trouble(&quiet), None);
         }
-        let done = notice(&Notice::CalibrationDone { run: 1, error_px: 40.0, saved: Ok(()) });
+        let done = notice(&Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 40.0, saved: Ok(()) });
         assert!(done.text.contains("約40ピクセル") && !done.warning);
     }
 }

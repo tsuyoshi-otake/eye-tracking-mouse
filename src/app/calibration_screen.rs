@@ -30,13 +30,17 @@ const DOT_RADIUS: f32 = 0.8;
 const RING_START: f32 = 5.0;
 const RING_END: f32 = 1.6;
 const RING_WIDTH: f32 = 0.5;
+/// The model's answer for a place of the check, in the same hundredths.
+const ANSWER_RADIUS: f32 = 1.2;
 /// How far down the page the lines of text are, as shares of its height. The
-/// places to look at are at 8, 50 and 92 percent, so these stay clear of them.
-const INSTRUCTION_AT: f32 = 0.28;
-const WARNING_AT: f32 = 0.36;
-const HINT_AT: f32 = 0.72;
-/// The bar that shows how far the run has got: its left and right ends and its top and bottom, as shares of the page.
-const BAR: (f32, f32, f32, f32) = (0.3, 0.7, 0.972, 0.984);
+/// rows of the grid are at 5, 27.5, 50, 72.5 and 95 percent, so these lie
+/// between them. (The places of the check go anywhere and are drawn on top.)
+const INSTRUCTION_AT: f32 = 0.3875;
+const WARNING_AT: f32 = 0.6125;
+const HINT_AT: f32 = 0.8375;
+/// The bar that shows how far the run has got: its left and right ends and its
+/// top and bottom, as shares of the page. Between the two upper rows of the grid.
+const BAR: (f32, f32, f32, f32) = (0.3, 0.7, 0.155, 0.167);
 
 /// Seconds without a camera frame after which the run is given up: while the
 /// camera may still be starting, and once it has delivered.
@@ -47,12 +51,13 @@ const WATCH_INTERVAL: u32 = 250;
 const WATCH_TIMER: usize = 1;
 
 /// Everything on the page for the screen `area` (desktop pixels). `None` while the run has not begun.
-pub fn scene(view: Option<&View>, area: RectI) -> Vec<Shape<'static>> {
+/// `score` is the line shown in place of a spot to look at once the view carries the check's outcome.
+pub fn scene<'a>(view: Option<&View>, score: &'a str, area: RectI) -> Vec<Shape<'a>> {
     let (width, height) = (area.width(), area.height());
     let unit = width.min(height) as f32 / 100.0;
-    // Small enough for the longest line to fit the width, and for three lines to fit above the middle.
+    // Small enough for the longest line to fit the width, and for a line to fit between two rows of the grid.
     let letters = (width / 40).min(height / 24).max(12);
-    let line = |text: &'static str, share: f32, colour: Colour| {
+    let line = |text: &'a str, share: f32, colour: Colour| {
         let middle = (height as f32 * share) as i32;
         Shape::Text { text, area: RectI::new(0, middle - letters, width, middle + letters), height: letters, colour }
     };
@@ -60,8 +65,9 @@ pub fn scene(view: Option<&View>, area: RectI) -> Vec<Shape<'static>> {
     match view {
         None => shapes.push(line(wording::CALIBRATION_PREPARING, INSTRUCTION_AT, TEXT)),
         Some(view) => {
-            shapes.push(line(wording::instruction(view.phase), INSTRUCTION_AT, TEXT));
-            if !view.face_visible {
+            let said = if view.score.is_some() { score } else { wording::instruction(view.phase) };
+            shapes.push(line(said, INSTRUCTION_AT, TEXT));
+            if !view.face_visible && view.score.is_none() {
                 shapes.push(line(wording::FACE_NOT_VISIBLE, WARNING_AT, WARNING));
             }
             let across = |share: f32| (width as f32 * share) as i32;
@@ -70,13 +76,20 @@ pub fn scene(view: Option<&View>, area: RectI) -> Vec<Shape<'static>> {
             let done = bar.left + (bar.width() as f32 * view.progress.clamp(0.0, 1.0)) as i32;
             shapes.push(Shape::Box { area: bar, colour: TRACK });
             shapes.push(Shape::Box { area: RectI::new(bar.left, bar.top, done, bar.bottom), colour: DONE });
-            // The ring closes in on the dot while the place is being recorded.
-            let centre = (view.target.0 - area.left, view.target.1 - area.top);
-            let ring = RING_START - (RING_START - RING_END) * view.dwell.clamp(0.0, 1.0);
+            let on_page = |(x, y): (i32, i32)| (x - area.left, y - area.top);
             let radius = |hundredths: f32| (unit * hundredths).round() as i32;
-            shapes.push(Shape::Disc { centre, radius: radius(ring), colour: RING });
-            shapes.push(Shape::Disc { centre, radius: radius(ring - RING_WIDTH), colour: BACKGROUND });
-            shapes.push(Shape::Disc { centre, radius: radius(DOT_RADIUS).max(2), colour: DOT });
+            if view.score.is_none() {
+                // The ring closes in on the dot while the place is being recorded.
+                let centre = on_page(view.target);
+                let ring = RING_START - (RING_START - RING_END) * view.dwell.clamp(0.0, 1.0);
+                shapes.push(Shape::Disc { centre, radius: radius(ring), colour: RING });
+                shapes.push(Shape::Disc { centre, radius: radius(ring - RING_WIDTH), colour: BACKGROUND });
+                shapes.push(Shape::Disc { centre, radius: radius(DOT_RADIUS).max(2), colour: DOT });
+            }
+            if let Some((answer, hit)) = view.answer {
+                let colour = if hit { DONE } else { WARNING };
+                shapes.push(Shape::Disc { centre: on_page(answer), radius: radius(ANSWER_RADIUS), colour });
+            }
         }
     }
     shapes.push(line(wording::CALIBRATION_HOW_TO_CANCEL, HINT_AT, HINT));
@@ -143,7 +156,8 @@ impl CalibrationScreen {
     }
 
     pub fn draw(&mut self) {
-        self.surface.paint(BACKGROUND, &scene(self.view.as_ref(), self.area));
+        let score = self.view.and_then(|view| view.score).map(wording::check_score).unwrap_or_default();
+        self.surface.paint(BACKGROUND, &scene(self.view.as_ref(), &score, self.area));
     }
 
     /// Takes note of the worker's count of camera frames at time `now`
@@ -163,17 +177,22 @@ impl Drop for CalibrationScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::calibration::Phase;
+    use crate::control::calibration::{Phase, Score};
 
     /// A second monitor to the right of the main one.
     const AREA: RectI = RectI::new(1920, 0, 3840, 1080);
 
     fn view(phase: Phase, target: (i32, i32), dwell: f32, progress: f32) -> View {
-        View { phase, target, dwell, progress, face_visible: true }
+        View { phase, target, dwell, progress, face_visible: true, answer: None, score: None }
     }
 
-    fn texts(shapes: &[Shape<'static>]) -> Vec<&'static str> {
-        let text = |shape: &Shape<'static>| match *shape {
+    /// The page for `view` on the second monitor, with no score to tell.
+    fn scene(view: Option<&View>, area: RectI) -> Vec<Shape<'static>> {
+        super::scene(view, "", area)
+    }
+
+    fn texts<'a>(shapes: &[Shape<'a>]) -> Vec<&'a str> {
+        let text = |shape: &Shape<'a>| match *shape {
             Shape::Text { text, .. } => Some(text),
             _ => None,
         };
@@ -213,7 +232,7 @@ mod tests {
 
     #[test]
     fn each_part_of_the_run_says_what_to_do_and_how_to_stop() {
-        for phase in [Phase::Rest, Phase::Places, Phase::Sweep] {
+        for phase in [Phase::Rest, Phase::Places, Phase::Sweep, Phase::Check] {
             let shapes = scene(Some(&view(phase, (2880, 540), 0.3, 0.4)), AREA);
             assert_eq!(texts(&shapes), [wording::instruction(phase), wording::CALIBRATION_HOW_TO_CANCEL]);
         }
@@ -231,8 +250,8 @@ mod tests {
     #[test]
     fn the_text_stays_clear_of_every_place_and_the_bar_shows_the_progress() {
         let shapes = scene(Some(&View { face_visible: false, ..view(Phase::Places, (2880, 540), 0.0, 0.25) }), AREA);
-        // The rows the places are in, with the largest ring around them.
-        let rows = [0.08f32, 0.5, 0.92].map(|share| (share * 1079.0) as i32).map(|y| (y - 54, y + 54));
+        // The rows of the grid, with the largest ring around them.
+        let rows = [0.05f32, 0.275, 0.5, 0.725, 0.95].map(|share| (share * 1079.0).round() as i32).map(|y| (y - 54, y + 54));
         for shape in &shapes {
             if let Shape::Text { area, height, .. } = *shape {
                 assert_eq!((area.left, area.right), (0, 1920), "centred across the page");
@@ -251,11 +270,34 @@ mod tests {
         assert_eq!((track.left, track.right), (576, 1344));
         assert_eq!((done.left, done.top, done.bottom), (track.left, track.top, track.bottom));
         assert_eq!(done.width(), track.width() / 4);
-        assert!(track.top > rows[2].1 && track.bottom <= 1080, "below the lowest place, on the page");
+        assert!(track.top > rows[0].1 && track.bottom < rows[1].0, "between the two upper rows");
 
         // A small upright screen still gets letters that can be read.
         let narrow = scene(Some(&view(Phase::Rest, (300, 400), 0.0, 0.0)), RectI::new(0, 0, 600, 800));
         assert!(narrow.iter().all(|shape| !matches!(*shape, Shape::Text { height, .. } if height < 12)));
+    }
+
+    #[test]
+    fn the_check_shows_the_models_answer_by_its_place_and_ends_with_the_score_alone() {
+        let place = view(Phase::Check, (1920 + 700, 400), 1.0, 0.8);
+        let answered = |answer, hit| discs(&super::scene(Some(&View { answer: Some((answer, hit)), ..place }), "", AREA));
+        // The place stays on the page and the answer is drawn over it, where the model put it on this screen.
+        let hit = answered((1920 + 720, 410), true);
+        assert_eq!(hit.len(), 4);
+        assert_eq!(hit[2], ((700, 400), 9, DOT));
+        assert_eq!(hit[3], ((720, 410), 13, DONE));
+        assert_eq!(answered((1920 + 900, 100), false)[3], ((900, 100), 13, WARNING));
+        // An answer beyond the screen's edge is no reason not to draw.
+        assert_eq!(answered((1900, -40), false)[3].0, (-20, -40));
+
+        let score = Score { hits: 9, places: 12, mean_px: 71.4 };
+        let line = wording::check_score(score);
+        // The face no longer matters once the score is up, and there is nothing left to look at.
+        let ended = View { score: Some(score), face_visible: false, ..place };
+        let shapes = super::scene(Some(&ended), &line, AREA);
+        assert_eq!(texts(&shapes), [line.as_str(), wording::CALIBRATION_HOW_TO_CANCEL]);
+        assert!(discs(&shapes).is_empty());
+        assert!(line.contains("9 / 12") && line.contains("71ピクセル"), "{line}");
     }
 
     #[test]

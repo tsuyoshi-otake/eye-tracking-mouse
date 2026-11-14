@@ -94,7 +94,7 @@ fn view() -> Option<Window> {
 }
 
 #[test]
-#[ignore = "starts the resident program: notifications and windows appear and three hotkeys are taken for a few seconds"]
+#[ignore = "starts the resident program: notifications and windows appear and four hotkeys are taken for a few seconds"]
 fn the_resident_program_starts_obeys_and_quits_without_a_camera() {
     assert!(window::find(MAIN_CLASS).is_none(), "the program is already running; quit it before running this test");
     assert!(view().is_none(), "a window of the program is still open; close it before running this test");
@@ -146,7 +146,8 @@ fn the_resident_program_starts_obeys_and_quits_without_a_camera() {
     assert!(first.contains("
 pointing = head
 "), "the template starts with the head");
-    press(Action::Pointing);
+    press(Action::PointHead);
+    press(Action::PointEye);
     wait_until("eye pointing in the log and the file", 5, || {
         let text = log(&folder);
         text.contains("pointing set to eye by the person")
@@ -155,7 +156,13 @@ pointing = head
 pointing = eye
 ")
     });
-    press(Action::Pointing);
+    press(Action::PointHybrid);
+    wait_until("hybrid pointing in the log and the file", 5, || {
+        log(&folder).contains("pointing set to hybrid by the person") && settings().contains("
+pointing = hybrid
+")
+    });
+    press(Action::PointHead);
     wait_until("head pointing in the log and the file", 5, || {
         log(&folder).contains("pointing set to head by the person") && settings().contains("
 pointing = head
@@ -168,10 +175,18 @@ pointing = head
     press(Action::Calibrate);
     wait_until("the failed calibration in the log", 15, || {
         let text = log(&folder);
-        text.contains("calibration run 1 started") && text.contains("キャリブレーションできませんでした")
+        text.contains("Calibration run 1 started") && text.contains("キャリブレーションできませんでした")
     });
     wait_until("the calibration page to go", 5, || view().is_none());
     assert!(!log(&folder).contains("cancelled by the person"), "nobody cancelled the run");
+
+    // The check that adds to a calibration is a run of its own and ends the same way without a camera.
+    let failures = || log(&folder).matches("キャリブレーションできませんでした").count();
+    let before = failures();
+    press(Action::Check);
+    wait_until("the failed check in the log", 15, || log(&folder).contains("Check run 2 started") && failures() > before);
+    wait_until("the page of the check to go", 5, || view().is_none());
+    assert!(!log(&folder).contains("cancelled by the person"), "nobody cancelled the check");
 
     // The preview comes and goes when asked for, and goes when the person closes it: with Escape ...
     press(Action::Preview);

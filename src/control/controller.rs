@@ -8,6 +8,10 @@
 //! 3. The gaze: a rest on a place far from the cursor jumps the cursor there.
 //! 4. The head: everything else is small head movement nudging the cursor.
 //!
+//! That is the head mode. In eye mode 3 and 4 give way to the gaze estimate
+//! being the cursor's place in every frame, and in hybrid mode the head's
+//! movement is added to that as a correction.
+//!
 //! The controller never touches the system; it returns what should be done.
 
 use std::collections::VecDeque;
@@ -21,6 +25,7 @@ use super::eye_pointer::EyePointer;
 use super::fixation::FixationDetector;
 use super::guard::{ManualGuard, Verdict};
 use super::head_pointer::{HeadGain, HeadPointer};
+use super::hybrid::Correction;
 
 /// Seconds of cursor history kept, for going back to before the lids dropped.
 const REWIND: f64 = 0.15;
@@ -42,12 +47,17 @@ pub enum PointingMode {
     /// The eyes move the cursor directly: every frame's gaze estimate is where
     /// it sits. Needs a calibration; without one the head carries pointing.
     Eye,
+    /// The eyes carry the cursor as in `Eye`, and small head movements move it
+    /// away from where the eyes put it, to make up for what the estimate is
+    /// off by. Looking somewhere else drops that correction. Needs a
+    /// calibration; without one the head carries pointing.
+    Hybrid,
 }
 
 /// What the person can adjust.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
-    /// Head or eyes.
+    /// Head, eyes, or both.
     pub pointing: PointingMode,
     /// Jump the cursor to where the person looks. Only in head mode: in eye
     /// mode every frame's estimate is already where the cursor is.
@@ -55,9 +65,16 @@ pub struct Tuning {
     /// Click with a long blink.
     pub blink_click: bool,
     pub head_gain: HeadGain,
-    /// How firmly the gaze-driven cursor is held in eye mode, like `head_gain`'s steadiness.
+    /// How firmly the gaze-driven cursor is held in eye and hybrid mode, like `head_gain`'s steadiness.
     pub eye_steadiness: f32,
-    /// The gaze moves the cursor only when it rests at least this many pixels away from it.
+    /// Cursor pixels per eye span of head movement in hybrid mode, at any speed. There the head
+    /// only corrects what the eyes carried, so it is slower than `head_gain` and does not speed
+    /// up with a quick movement: measured on a person, the quick gain threw the cursor by up to
+    /// 460 px in one frame.
+    pub hybrid_speed: f32,
+    /// In head mode the gaze moves the cursor only when it rests at least this many pixels
+    /// away from it. In hybrid mode the head's correction is dropped once the eyes have
+    /// carried the cursor this far from where the correction began.
     pub jump_distance: f32,
     pub blink: BlinkSettings,
 }
@@ -70,6 +87,7 @@ impl Default for Tuning {
             blink_click: true,
             head_gain: HeadGain { slow: 700.0, fast: 2200.0, steadiness: 2.0 },
             eye_steadiness: 1.5,
+            hybrid_speed: 450.0,
             jump_distance: 250.0,
             blink: BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.6 },
         }
@@ -111,9 +129,22 @@ pub enum Activity {
     Blocked,
 }
 
+/// What the frame's pointing was made of. Nothing acts on it; it is for
+/// looking into afterwards why the cursor went where it did.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Makeup {
+    /// The gaze model's estimate in desktop pixels, when it was asked.
+    pub estimate: Option<Vec2>,
+    /// Where the eyes put the cursor after filtering (eye and hybrid mode).
+    pub eyes: Option<Vec2>,
+    /// What the head added in this frame, in pixels.
+    pub nudge: Vec2,
+}
+
 /// What to do after this frame. At most one of `move_to` and `click_at` is set.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Decision {
+    pub makeup: Makeup,
     pub move_to: Option<(i32, i32)>,
     /// Put the cursor on this pixel and left-click.
     pub click_at: Option<(i32, i32)>,
@@ -126,6 +157,7 @@ pub struct Controller {
     guard: ManualGuard,
     head: HeadPointer,
     eye: EyePointer,
+    correction: Correction,
     blink: BlinkClicker,
     fixation: FixationDetector,
     /// Where the cursor should be, finer than a pixel. `None` until it is taken over from the system.
@@ -162,6 +194,7 @@ impl Controller {
         let sound = sound_for(self.blink.step(time, None, &tuning.blink)).filter(|_| tuning.blink_click);
         self.head.reset();
         self.eye.reset();
+        self.correction.reset();
         self.fixation.reset();
         self.trail.clear();
         self.anchor = None;
@@ -169,13 +202,26 @@ impl Controller {
         sound
     }
 
+    /// Forgets everything about the frames before, except whose the cursor is: a cursor that
+    /// was yielded stays yielded, and is asked for with a probe like any other.
+    pub fn restart(&mut self) {
+        *self = Controller { guard: std::mem::take(&mut self.guard), ..Controller::default() };
+    }
+
     pub fn step(&mut self, frame: &Frame, tuning: &Tuning) -> Decision {
         let time = frame.time;
         let Some(actual) = frame.cursor else {
             return Decision { sound: self.suspend(time, tuning), activity: Activity::Blocked, ..Decision::default() };
         };
-        if self.guard.observe(time, actual) == Verdict::Hold {
-            return Decision { sound: self.suspend(time, tuning), activity: Activity::Yielded, ..Decision::default() };
+        let probe = match self.guard.observe(time, actual) {
+            Verdict::Go { .. } => None,
+            Verdict::Hold => Some(None),
+            // Past the edge of the screens there is nothing to try; the guard tries the other side next.
+            Verdict::Probe((x, y)) => Some(clamp_to_union(frame.screens, f64::from(x), f64::from(y)).filter(|pixel| *pixel == (x, y))),
+        };
+        if let Some(move_to) = probe {
+            let sound = self.suspend(time, tuning);
+            return Decision { sound, activity: Activity::Yielded, move_to, ..Decision::default() };
         }
         // After a hold the position is gone, and the cursor is taken over from wherever it is now.
         let mut position = self.position.unwrap_or(Vec2::new(actual.0 as f32, actual.1 as f32));
@@ -208,12 +254,16 @@ impl Controller {
             self.anchor = None;
         }
 
+        let mut makeup = Makeup::default();
         if !closed && time >= self.steady_from {
             match tuning.pointing {
                 PointingMode::Head => {
-                    position = position + self.head.step(time, &face.pose, &tuning.head_gain);
+                    makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                    position = position + makeup.nudge;
                     if let Some(calibration) = frame.calibration.filter(|_| tuning.gaze_jump) {
-                        let rest = self.fixation.step(time, calibration.gaze.predict(face), tuning.jump_distance * NEW_PLACE_SHARE);
+                        let estimate = calibration.gaze.predict(face);
+                        makeup.estimate = Some(estimate);
+                        let rest = self.fixation.step(time, estimate, tuning.jump_distance * NEW_PLACE_SHARE);
                         let place = rest.and_then(|place| landing(calibration.area, place));
                         if let Some(place) = place.filter(|place| place.distance(position) >= tuning.jump_distance) {
                             position = place;
@@ -224,13 +274,36 @@ impl Controller {
                     // The estimate is the position, kept on the calibrated
                     // screen. Looking past it holds the cursor where it is.
                     Some(calibration) => {
-                        if let Some(place) = landing(calibration.area, calibration.gaze.predict(face)) {
+                        let estimate = calibration.gaze.predict(face);
+                        makeup.estimate = Some(estimate);
+                        if let Some(place) = landing(calibration.area, estimate) {
                             position = self.eye.step(time, place, tuning.eye_steadiness);
+                            makeup.eyes = Some(position);
                         }
                     }
                     // No calibration yet: the head carries pointing until there is one.
-                    None => position = position + self.head.step(time, &face.pose, &tuning.head_gain),
+                    None => {
+                        makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                        position = position + makeup.nudge;
+                    }
                 },
+                PointingMode::Hybrid => {
+                    // Correcting is fine work; without a calibration the head carries everything, as in head mode.
+                    let fine = HeadGain { slow: tuning.hybrid_speed, fast: tuning.hybrid_speed, ..tuning.head_gain };
+                    let gain = if frame.calibration.is_some() { fine } else { tuning.head_gain };
+                    makeup.nudge = self.head.step(time, &face.pose, &gain);
+                    makeup.estimate = frame.calibration.map(|calibration| calibration.gaze.predict(face));
+                    let seen = frame.calibration.zip(makeup.estimate).and_then(|(calibration, estimate)| landing(calibration.area, estimate));
+                    position = match seen {
+                        Some(place) => {
+                            let eyes = self.eye.step(time, place, tuning.eye_steadiness);
+                            makeup.eyes = Some(eyes);
+                            self.correction.step(position, eyes, makeup.nudge, tuning.jump_distance)
+                        }
+                        // No calibration, or looking past the screen: the eyes hold their part and the head goes on.
+                        None => position + makeup.nudge,
+                    };
+                }
             }
             self.trail.push_back((time, position));
             while self.trail.front().is_some_and(|&(then, _)| time - then > REWIND) {
@@ -246,7 +319,7 @@ impl Controller {
         let Some(pixel) = clamp_to_union(frame.screens, f64::from(position.x), f64::from(position.y)) else {
             // No screen to be on: start over from the cursor once there is one.
             self.position = None;
-            return Decision { sound: sound_for(event), activity: Activity::Blocked, ..Decision::default() };
+            return Decision { sound: sound_for(event), activity: Activity::Blocked, makeup, ..Decision::default() };
         };
         // At an edge the position stops with the cursor, so turning back takes effect at once.
         if (pixel.0 as f32 - position.x).abs() > 0.5 {
@@ -256,7 +329,7 @@ impl Controller {
             position.y = pixel.1 as f32;
         }
         self.position = Some(position);
-        let mut decision = Decision { sound: sound_for(event), ..Decision::default() };
+        let mut decision = Decision { sound: sound_for(event), makeup, ..Decision::default() };
         if clicking {
             decision.click_at = Some(pixel);
             self.guard.commanded(pixel);
@@ -448,7 +521,8 @@ mod tests {
         assert_eq!((desk.at(), desk.moves), (left_at, moves), "still yielding 1.3 s after the mouse stopped");
         desk.rest(10, 0.2, OPEN);
         assert_eq!(desk.activity, Activity::Tracking);
-        assert_eq!(desk.at(), left_at, "taking over does not move the cursor");
+        let taken_at = (left_at.0 + 1, left_at.1);
+        assert_eq!(desk.at(), taken_at, "taking over moves the cursor by the one pixel that asks whether it may");
         desk.turn(15, 0.2, 0.25, OPEN);
         assert!(desk.at().0 < left_at.0 && (desk.at().0 - left_at.0).abs() < 200, "{:?}", desk.at());
     }
@@ -464,7 +538,39 @@ mod tests {
         assert_eq!(desk.sounds, [Sound::Armed, Sound::Cancelled]);
         desk.rest(90, 0.0, OPEN);
         assert!(desk.clicks.is_empty());
-        assert_eq!(desk.at(), (900, 900));
+        assert_eq!(desk.at(), (901, 900), "the pixel tried on taking over, and nothing else");
+    }
+
+    #[test]
+    fn while_the_pointer_is_on_another_computer_nothing_but_single_pixels_is_sent() {
+        // A program sharing the mouse with another computer takes every move sent here
+        // and the cursor stays where it was parked.
+        let parked = (1200, 400);
+        let mut desk = Desk::new();
+        desk.rest(45, 0.0, OPEN);
+        let (mut sent, moves) = (Vec::new(), desk.moves);
+        for frame in 0..600 {
+            desk.cursor = Some(parked);
+            let yaw = 0.2 * (f32::from(frame as u16) / 20.0).sin();
+            desk.turn(1, yaw, yaw, OPEN);
+            if desk.at() != parked {
+                sent.push((desk.at().0 - parked.0, desk.at().1 - parked.1));
+            }
+        }
+        // 20 seconds of a turning head: one pixel every 1.5 s, to the right and to the left in turn.
+        assert!((4..=14).contains(&sent.len()) && sent.len() as u32 == desk.moves - moves, "{sent:?}");
+        assert!(sent.iter().all(|step| step.0.abs() == 1 && step.1 == 0), "{sent:?}");
+        assert!(sent.windows(2).all(|pair| pair[0].0 + pair[1].0 == 0), "{sent:?}");
+        assert!(desk.clicks.is_empty());
+        // Starting over (a gap in the frames, another pointing mode) does not take the cursor back unasked.
+        let (moves, far) = (desk.moves, desk.at());
+        desk.controller.restart();
+        desk.cursor = Some(parked);
+        desk.turn(20, 0.2, 0.25, OPEN);
+        assert!(desk.moves - moves <= 1 && (desk.at().0 - parked.0).abs() <= 1, "{:?} after {far:?}", desk.at());
+        // Back on this computer the cursor obeys again, and the head has it after one more pixel.
+        desk.rest(60, 0.0, OPEN);
+        assert_eq!(desk.activity, Activity::Tracking);
     }
 
     #[test]
@@ -661,6 +767,72 @@ mod tests {
         assert!(distance(rested, Vec2::new(1280.0, 540.0)) < 3.0, "a still head moves next to nothing: {rested:?}");
         assert!(turned.0 < 1280 - 50, "the head still points while there is no calibration: {turned:?}");
         assert_eq!((rested, turned), run(PointingMode::Head), "pixel for pixel what head mode does");
+    }
+
+    #[test]
+    fn in_hybrid_mode_the_eyes_carry_the_cursor_and_the_head_corrects_it_until_the_eyes_move_on() {
+        // The same person twice, measured with the same noise: the eyes alone, and both.
+        let run = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            let target = Vec2::new(1700.0, 420.0);
+            sitter.look(&mut desk, 60, &Posture::default(), target, 1.0);
+            let carried = desk.at();
+            // The eyes stay on the place while the head turns a little and rests.
+            for step in 1..=20 {
+                sitter.look(&mut desk, 1, &Posture { yaw: 0.004 * step as f32, ..Posture::default() }, target, 1.0);
+            }
+            let turned = Posture { yaw: 0.08, ..Posture::default() };
+            sitter.look(&mut desk, 30, &turned, target, 1.0);
+            let corrected = desk.at();
+            sitter.look(&mut desk, 60, &turned, Vec2::new(600.0, 800.0), 1.0);
+            (carried, corrected, desk.at())
+        };
+        let (eye, hybrid) = (run(PointingMode::Eye), run(PointingMode::Hybrid));
+        let apart = |one: (i32, i32), other: (i32, i32)| distance(one, Vec2::new(other.0 as f32, other.1 as f32));
+        assert!(apart(hybrid.0, eye.0) < 3.0, "with a still head the eyes alone decide: {:?} against {:?}", hybrid.0, eye.0);
+        assert!(distance(hybrid.0, Vec2::new(1700.0, 420.0)) < 120.0, "{:?}", hybrid.0);
+        // The turn of the head moved the cursor to the person's left, which the eyes alone would not have.
+        assert!(hybrid.1.0 < eye.1.0 - 25, "hybrid {:?} against eye {:?}", hybrid.1, eye.1);
+        assert!(apart(eye.1, eye.0) < 40.0, "the eyes alone stay: {:?} from {:?}", eye.1, eye.0);
+        // Looking somewhere else leaves the correction behind.
+        assert!(apart(hybrid.2, eye.2) < 3.0, "hybrid {:?} against eye {:?}", hybrid.2, eye.2);
+    }
+
+    #[test]
+    fn in_hybrid_mode_a_quick_turn_of_the_head_does_not_throw_the_cursor_as_it_does_in_head_mode() {
+        // The same quick turn while the eyes stay on one place: how far the cursor went from where it rested.
+        let thrown = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            desk.tuning.gaze_jump = false;
+            let target = Vec2::new(1700.0, 420.0);
+            sitter.look(&mut desk, 60, &Posture::default(), target, 1.0);
+            let rested = desk.at();
+            for step in 1..=5 {
+                sitter.look(&mut desk, 1, &Posture { yaw: 0.03 * step as f32, ..Posture::default() }, target, 1.0);
+            }
+            sitter.look(&mut desk, 20, &Posture { yaw: 0.15, ..Posture::default() }, target, 1.0);
+            distance(desk.at(), Vec2::new(rested.0 as f32, rested.1 as f32))
+        };
+        let (head, hybrid) = (thrown(PointingMode::Head), thrown(PointingMode::Hybrid));
+        assert!(hybrid > 20.0, "the head still corrects: {hybrid} px");
+        assert!(hybrid < head * 0.4, "hybrid {hybrid} px against head mode's {head} px");
+    }
+
+    #[test]
+    fn hybrid_mode_without_a_calibration_points_with_the_head() {
+        let run = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            look_uncalibrated(&mut sitter, &mut desk, 30, &Posture::default(), Vec2::new(1280.0, 540.0));
+            for step in 1..=20 {
+                look_uncalibrated(&mut sitter, &mut desk, 1, &Posture { yaw: 0.01 * step as f32, ..Posture::default() }, Vec2::new(1280.0, 540.0));
+            }
+            desk.at()
+        };
+        assert!(run(PointingMode::Hybrid).0 < 1280 - 50);
+        assert_eq!(run(PointingMode::Hybrid), run(PointingMode::Head), "pixel for pixel what head mode does");
     }
 
     #[test]

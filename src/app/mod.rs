@@ -10,6 +10,7 @@ mod icon;
 mod log;
 mod pipeline;
 mod preview;
+mod record;
 pub mod selftest;
 mod settings;
 mod storage;
