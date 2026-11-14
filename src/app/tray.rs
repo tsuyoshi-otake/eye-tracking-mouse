@@ -31,7 +31,7 @@ use crate::platform::window::{self, Event, Kind, Poster, Window};
 use super::calibration_screen::CalibrationScreen;
 use super::icon::{self, Look};
 use super::log::Log;
-use super::pipeline::{CalibrationProblem, Notice, Pipeline, Setup, Status};
+use super::pipeline::{CalibrationProblem, Notice, Pipeline, Routine, Setup, Status};
 use super::preview::PreviewWindow;
 use super::settings;
 use super::storage::Storage;
@@ -60,6 +60,8 @@ const CAMERA_SILENT: &str = "the camera sends no pictures";
 pub enum Action {
     Pause = 1,
     Calibrate,
+    /// Check the calibration there is and add what the check finds to it.
+    Check,
     Preview,
     /// What moves the cursor: the head, the eyes, or the eyes with the head correcting.
     PointHead,
@@ -70,9 +72,10 @@ pub enum Action {
 }
 
 impl Action {
-    const ALL: [Action; 8] = [
+    const ALL: [Action; 9] = [
         Action::Pause,
         Action::Calibrate,
+        Action::Check,
         Action::Preview,
         Action::PointHead,
         Action::PointEye,
@@ -87,7 +90,8 @@ impl Action {
 }
 
 /// Ctrl+Alt+letter for the actions that have a hotkey.
-const HOTKEYS: [(Action, char); 3] = [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Quit, 'Q')];
+const HOTKEYS: [(Action, char); 4] =
+    [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Check, 'T'), (Action::Quit, 'Q')];
 
 #[derive(PartialEq, Eq)]
 enum Flow {
@@ -163,6 +167,7 @@ fn screen_under_pointer() -> Result<RectI> {
 /// A calibration run, by the number the worker knows it by, and the page that shows it.
 struct Run {
     number: u32,
+    routine: Routine,
     page: CalibrationScreen,
 }
 
@@ -282,11 +287,15 @@ impl App {
 
     fn menu(&self) -> Vec<MenuItem<'static>> {
         let pause = if self.pipeline.is_paused() { wording::MENU_RESUME } else { wording::MENU_PAUSE };
-        let calibrate = if self.calibration.is_some() { wording::MENU_CALIBRATE_STOP } else { wording::MENU_CALIBRATE };
+        let running = self.calibration.as_ref().map(|run| run.routine);
+        let stops = |routine, stop, start| if running == Some(routine) { stop } else { start };
+        let calibrate = stops(Routine::Calibration, wording::MENU_CALIBRATE_STOP, wording::MENU_CALIBRATE);
+        let check = stops(Routine::Check, wording::MENU_CHECK_STOP, wording::MENU_CHECK);
         let item = |action: Action, label, checked| MenuItem::Action { id: action as u32, label, checked };
         vec![
             item(Action::Pause, pause, false),
             item(Action::Calibrate, calibrate, false),
+            item(Action::Check, check, false),
             item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
             item(Action::PointHead, wording::MENU_POINT_HEAD, self.pointing == PointingMode::Head),
@@ -306,8 +315,10 @@ impl App {
                 self.pipeline.set_paused(paused);
                 self.log.line(if paused { "paused by the person" } else { "resumed by the person" });
             }
-            Some(Action::Calibrate) if self.calibration.is_some() => self.cancel_calibration(),
-            Some(Action::Calibrate) => self.start_calibration(),
+            // Whichever of the two is running, either key ends it: the page covers the screen.
+            Some(Action::Calibrate | Action::Check) if self.calibration.is_some() => self.cancel_calibration(),
+            Some(Action::Calibrate) => self.start_run(Routine::Calibration),
+            Some(Action::Check) => self.start_run(Routine::Check),
             Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
             Some(Action::Preview) => self.open_preview(),
             Some(Action::PointHead) => self.choose_pointing(PointingMode::Head),
@@ -356,7 +367,7 @@ impl App {
     }
 
     /// Opens the calibration page on the screen the pointer is on and starts a run for that screen.
-    fn start_calibration(&mut self) {
+    fn start_run(&mut self, routine: Routine) {
         if matches!(self.status, Status::Stopped(_)) {
             // Without the worker there is nothing to calibrate with; the person is told again why it is gone.
             if let Some(message) = wording::trouble(&self.status) {
@@ -369,10 +380,10 @@ impl App {
             .and_then(|area| CalibrationScreen::open(VIEW_CLASS, area, frames, now).map(|page| (area, page)));
         match opened {
             Ok((area, page)) => {
-                let number = self.pipeline.start_calibration(area);
+                let number = self.pipeline.start_run(routine, area);
                 let (left, top, width, height) = (area.left, area.top, area.width(), area.height());
-                self.log.line(&format!("calibration run {number} started for the screen at {left},{top} ({width}x{height})"));
-                self.calibration = Some(Run { number, page });
+                self.log.line(&format!("{routine:?} run {number} started for the screen at {left},{top} ({width}x{height})"));
+                self.calibration = Some(Run { number, routine, page });
             }
             Err(error) => self.show(&wording::window_not_opened(error.message())),
         }

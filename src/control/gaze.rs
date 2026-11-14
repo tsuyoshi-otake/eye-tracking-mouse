@@ -83,6 +83,15 @@ pub struct Sample {
     pub place: Option<usize>,
 }
 
+/// What one sample teaches, in the model's own inputs. A calibration keeps these of the
+/// frames it was made from, so that the model can be fitted again when more are added.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lesson {
+    pub inputs: [f64; FEATURES],
+    /// Desktop pixels.
+    pub target: Vec2,
+}
+
 fn features(face: &FaceMeasurement, neutral: &Neutral) -> [f64; FEATURES] {
     let pose = &face.pose;
     // Above 1 when the head is farther away than it was at calibration.
@@ -176,6 +185,16 @@ impl GazeModel {
             && neutral.scale > 0.0
             && weights.iter().flatten().all(|w| w.is_finite());
         usable.then_some(GazeModel { neutral, weights })
+    }
+
+    /// What `sample` teaches a model that measures against this one's neutral pose.
+    pub fn lesson(&self, sample: &Sample) -> Lesson {
+        Lesson { inputs: features(&sample.face, &self.neutral), target: sample.target }
+    }
+
+    /// This model fitted to `lessons` instead; `None` when they cannot support a fit.
+    pub fn refit(&self, lessons: &[Lesson]) -> Option<GazeModel> {
+        GazeModel::from_parts(self.neutral, fit_rows(lessons.iter().map(|lesson| (lesson.inputs, lesson.target)).collect())?)
     }
 
     pub fn neutral(&self) -> Neutral {

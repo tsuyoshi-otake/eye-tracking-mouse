@@ -79,12 +79,21 @@ pub enum CalibrationProblem {
     Camera(String),
     DisplayChanged,
     Paused,
+    /// A check was asked for, and there is no calibration for this screen and camera to check.
+    NotCalibrated,
+}
+
+/// What a run does: make a calibration, or check the one there is and add to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Routine {
+    Calibration,
+    Check,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
     /// Calibration run `run` succeeded. `saved` tells whether it will still be there after a restart.
-    CalibrationDone { run: u32, error_px: f32, saved: std::result::Result<(), String> },
+    CalibrationDone { run: u32, routine: Routine, error_px: f32, saved: std::result::Result<(), String> },
     /// Calibration run `run` ended without a result.
     CalibrationFailed { run: u32, problem: CalibrationProblem },
     /// The calibration cannot be used for gaze jumps as things are; pointing with the head goes on.
@@ -116,7 +125,7 @@ pub struct Setup {
 enum Command {
     /// The shared flags changed.
     Wake,
-    StartCalibration { run: u32, area: RectI },
+    StartCalibration { run: u32, area: RectI, routine: Routine },
     CancelCalibration(u32),
     DisplayChanged,
     SetPointing(PointingMode),
@@ -266,13 +275,13 @@ impl Pipeline {
         self.send(Command::Wake);
     }
 
-    /// Starts a calibration run on the screen `area` (desktop pixels), ending a pause if there is
+    /// Starts a run of `routine` on the screen `area` (desktop pixels), ending a pause if there is
     /// one and taking the place of a run that is still going. Returns the number of the new run.
-    pub fn start_calibration(&self, area: RectI) -> u32 {
+    pub fn start_run(&self, routine: Routine, area: RectI) -> u32 {
         let run = self.last_run.get().wrapping_add(1);
         self.last_run.set(run);
         self.shared.paused.store(false, Ordering::SeqCst);
-        self.send(Command::StartCalibration { run, area });
+        self.send(Command::StartCalibration { run, area, routine });
         run
     }
 
@@ -381,8 +390,10 @@ struct Worker<'a> {
     /// The camera is not opened before this time.
     retry_at: f64,
     gaps: u32,
-    /// A calibration run waiting for the camera to deliver: its number and its screen.
-    pending_calibration: Option<(u32, RectI)>,
+    /// A run waiting for the camera to deliver: its number, its screen and what it is to do.
+    pending_calibration: Option<(u32, RectI, Routine)>,
+    /// What the run the engine is working on does.
+    routine: Routine,
     /// The number of the run the engine is working on: there exactly while the engine is
     /// calibrating, and never together with a run that is waiting.
     run: Option<u32>,
@@ -417,6 +428,7 @@ impl<'a> Worker<'a> {
             retry_at: 0.0,
             gaps: 0,
             pending_calibration: None,
+            routine: Routine::Calibration,
             run: None,
             record_wanted: setup.record_calibration,
             record: None,
@@ -498,14 +510,14 @@ impl<'a> Worker<'a> {
         match command {
             Command::Quit => return Flow::Quit,
             Command::Wake => self.retry_now(),
-            Command::StartCalibration { run, area } => {
+            Command::StartCalibration { run, area, routine } => {
                 // A run that is still going makes way without a word, like one that was cancelled.
                 self.abandon_run();
-                self.pending_calibration = Some((run, area));
+                self.pending_calibration = Some((run, area, routine));
                 self.retry_now();
             }
             Command::CancelCalibration(run) => {
-                self.pending_calibration.take_if(|(waiting, _)| *waiting == run);
+                self.pending_calibration.take_if(|(waiting, ..)| *waiting == run);
                 if self.run == Some(run) {
                     self.abandon_run();
                 }
@@ -527,8 +539,19 @@ impl<'a> Worker<'a> {
 
     /// Hands a run that was waiting for the camera to the engine, now that there is a frame.
     fn begin_waiting_run(&mut self, frame_size: (u32, u32), time: f64) {
-        if let Some((run, area)) = self.pending_calibration.take() {
-            self.engine.start_calibration(area, frame_size, time);
+        if let Some((run, area, routine)) = self.pending_calibration.take() {
+            let started = match routine {
+                Routine::Calibration => {
+                    self.engine.start_calibration(area, frame_size, time);
+                    true
+                }
+                Routine::Check => self.engine.start_check(area, frame_size, time),
+            };
+            if !started {
+                self.shared.notice(Notice::CalibrationFailed { run, problem: CalibrationProblem::NotCalibrated });
+                return;
+            }
+            self.routine = routine;
             self.run = Some(run);
             self.record = self.record_wanted.then(|| CalibrationRecord::begin(area, frame_size));
         }
@@ -546,7 +569,7 @@ impl<'a> Worker<'a> {
 
     /// Ends a calibration run that is under way or waiting to start, telling the owner why.
     fn end_calibration(&mut self, problem: CalibrationProblem) {
-        let waiting = self.pending_calibration.take().map(|(run, _)| run);
+        let waiting = self.pending_calibration.take().map(|(run, ..)| run);
         if let Some(run) = self.abandon_run().or(waiting) {
             self.shared.notice(Notice::CalibrationFailed { run, problem });
         }
@@ -661,7 +684,8 @@ impl<'a> Worker<'a> {
             self.shared.notice(match outcome {
                 Ok(error_px) => {
                     let saved = self.engine.calibration().map_or(Ok(()), |c| self.storage.save_calibration(c));
-                    Notice::CalibrationDone { run, error_px, saved: saved.map_err(|error| error.message().to_string()) }
+                    let (routine, saved) = (self.routine, saved.map_err(|error| error.message().to_string()));
+                    Notice::CalibrationDone { run, routine, error_px, saved }
                 }
                 Err(failure) => Notice::CalibrationFailed { run, problem: CalibrationProblem::Routine(failure) },
             });
@@ -686,6 +710,10 @@ mod tests {
     use super::*;
     use crate::control::calibration::Phase;
     use std::sync::atomic::AtomicUsize;
+
+    fn start(run: u32, area: RectI) -> Command {
+        Command::StartCalibration { run, area, routine: Routine::Calibration }
+    }
 
     /// A camera index no machine has, so the worker never gets a frame and never touches the pointer.
     const NO_SUCH_CAMERA: usize = 31;
@@ -737,34 +765,40 @@ mod tests {
         let failed = |run| vec![Notice::CalibrationFailed { run, problem: CalibrationProblem::DisplayChanged }];
 
         // While a run waits for the camera, only its own number cancels it.
-        worker.obey(Command::StartCalibration { run: 1, area });
+        worker.obey(start(1, area));
         worker.obey(Command::CancelCalibration(2));
         worker.obey(Command::DisplayChanged);
         assert_eq!(notices(), failed(1));
         worker.obey(Command::DisplayChanged);
         assert!(notices().is_empty(), "a run ends once");
 
-        worker.obey(Command::StartCalibration { run: 2, area });
+        // A check without a calibration to check ends at once, saying so, and leaves no run behind.
+        worker.obey(Command::StartCalibration { run: 20, area, routine: Routine::Check });
+        worker.begin_waiting_run((1280, 720), 0.5);
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 20, problem: CalibrationProblem::NotCalibrated }]);
+        assert_eq!((worker.run, worker.engine.is_calibrating()), (None, false));
+
+        worker.obey(start(2, area));
         worker.obey(Command::CancelCalibration(2));
         worker.obey(Command::DisplayChanged);
         assert!(notices().is_empty(), "a cancelled run ends without a word");
 
         // A newer run takes the place of one that waits ...
-        worker.obey(Command::StartCalibration { run: 3, area });
-        worker.obey(Command::StartCalibration { run: 4, area });
+        worker.obey(start(3, area));
+        worker.obey(start(4, area));
         worker.begin_waiting_run((1280, 720), 0.0);
         assert!(worker.engine.is_calibrating() && worker.run == Some(4));
         worker.obey(Command::CancelCalibration(3));
         assert!(worker.engine.is_calibrating(), "the number of another run does not end this one");
         // ... and of one the engine is working on.
-        worker.obey(Command::StartCalibration { run: 5, area });
+        worker.obey(start(5, area));
         assert!(!worker.engine.is_calibrating() && worker.run.is_none());
         worker.begin_waiting_run((1280, 720), 1.0);
         worker.obey(Command::DisplayChanged);
         assert_eq!(notices(), failed(5), "runs 3 and 4 made way without a word");
         assert!(!worker.engine.is_calibrating());
 
-        worker.obey(Command::StartCalibration { run: 6, area });
+        worker.obey(start(6, area));
         worker.begin_waiting_run((1280, 720), 2.0);
         worker.obey(Command::CancelCalibration(6));
         assert!(!worker.engine.is_calibrating());
@@ -772,7 +806,7 @@ mod tests {
         assert!(notices().is_empty());
 
         // What the engine reports is passed on under the run's number: its view, then its ending.
-        worker.obey(Command::StartCalibration { run: 7, area });
+        worker.obey(start(7, area));
         worker.begin_waiting_run((1280, 720), 3.0);
         let seen = || {
             let board = shared.board();
@@ -849,7 +883,7 @@ mod tests {
         assert!(calls.load(Ordering::SeqCst) >= 1, "the owner was told that there is news");
 
         // A calibration cannot start without a camera, and says so exactly once.
-        let run = pipeline.start_calibration(RectI::new(0, 0, 1920, 1080));
+        let run = pipeline.start_run(Routine::Calibration, RectI::new(0, 0, 1920, 1080));
         wait_for(&pipeline, &mut notices, |_, notices| !notices.is_empty());
         std::thread::sleep(Duration::from_millis(300));
         wait_for(&pipeline, &mut notices, |_, _| true);
@@ -860,7 +894,7 @@ mod tests {
             ),
             "{notices:?}"
         );
-        assert_ne!(pipeline.start_calibration(RectI::new(0, 0, 1920, 1080)), run, "every run has a number of its own");
+        assert_ne!(pipeline.start_run(Routine::Calibration, RectI::new(0, 0, 1920, 1080)), run, "every run has a number of its own");
         wait_for(&pipeline, &mut notices, |_, notices| notices.len() == 2);
         notices.pop();
 
