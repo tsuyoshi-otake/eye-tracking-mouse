@@ -11,13 +11,19 @@ use crate::geometry::Vec2;
 
 use super::filter::{Backlash, OneEuro2};
 
+// The three constants were chosen against the simulated person's estimate at
+// rest, which scatters by about 36 px on each axis and by 60 px from one frame
+// to the next (2,000 px/s). They are a starting point until a person's own
+// noise has been read from `--diag`.
+
 /// Smoothing at rest (Hz), at a steadiness of 1.
-const REST_CUTOFF: f32 = 0.8;
-/// Cutoff gained per pixel per second of estimate speed: a saccade, thousands
-/// of pixels a second, opens the filter almost completely.
-const SPEED_RESPONSE: f32 = 0.01;
+const REST_CUTOFF: f32 = 0.4;
+/// Cutoff gained per pixel per second of estimate speed. A saccade is tens of
+/// thousands of pixels a second and opens the filter; the jitter's own speed
+/// must not, which it did at twenty times this value.
+const SPEED_RESPONSE: f32 = 0.0005;
 /// Estimate jitter below this many pixels never moves the cursor, at a steadiness of 1.
-const SLACK: f32 = 6.0;
+const SLACK: f32 = 10.0;
 
 #[derive(Clone, Debug)]
 pub struct EyePointer {

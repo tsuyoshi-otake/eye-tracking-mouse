@@ -646,14 +646,21 @@ mod tests {
 
     #[test]
     fn eye_mode_without_a_calibration_points_with_the_head() {
-        let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
-        desk.tuning.pointing = PointingMode::Eye;
-        look_uncalibrated(&mut sitter, &mut desk, 30, &Posture::default(), Vec2::new(1280.0, 540.0));
-        assert_eq!(desk.at(), (1280, 540), "a still head moves nothing");
-        for step in 1..=20 {
-            look_uncalibrated(&mut sitter, &mut desk, 1, &Posture { yaw: 0.01 * step as f32, ..Posture::default() }, Vec2::new(1280.0, 540.0));
-        }
-        assert!(desk.at().0 < 1280 - 50, "the head still points while there is no calibration: {:?}", desk.at());
+        // The same person twice, measured with the same noise: once in each mode.
+        let run = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            look_uncalibrated(&mut sitter, &mut desk, 30, &Posture::default(), Vec2::new(1280.0, 540.0));
+            let rested = desk.at();
+            for step in 1..=20 {
+                look_uncalibrated(&mut sitter, &mut desk, 1, &Posture { yaw: 0.01 * step as f32, ..Posture::default() }, Vec2::new(1280.0, 540.0));
+            }
+            (rested, desk.at())
+        };
+        let (rested, turned) = run(PointingMode::Eye);
+        assert!(distance(rested, Vec2::new(1280.0, 540.0)) < 3.0, "a still head moves next to nothing: {rested:?}");
+        assert!(turned.0 < 1280 - 50, "the head still points while there is no calibration: {turned:?}");
+        assert_eq!((rested, turned), run(PointingMode::Head), "pixel for pixel what head mode does");
     }
 
     #[test]
