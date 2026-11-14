@@ -139,6 +139,30 @@ fn the_resident_program_starts_obeys_and_quits_without_a_camera() {
         text.contains("resumed by the person") && text.matches("再試行中").count() >= 2
     });
 
+    // The menu's choice of pointing: taken at once, written into the settings file, and said to
+    // need a calibration, which this folder does not have. Choosing again puts it back.
+    let settings = || std::fs::read_to_string(folder.join("settings.txt")).unwrap();
+    let first = settings();
+    assert!(first.contains("
+pointing = head
+"), "the template starts with the head");
+    press(Action::Pointing);
+    wait_until("eye pointing in the log and the file", 5, || {
+        let text = log(&folder);
+        text.contains("pointing set to eye by the person")
+            && text.contains("キャリブレーションが必要です")
+            && settings().contains("
+pointing = eye
+")
+    });
+    press(Action::Pointing);
+    wait_until("head pointing in the log and the file", 5, || {
+        log(&folder).contains("pointing set to head by the person") && settings().contains("
+pointing = head
+")
+    });
+    assert_eq!(settings(), first, "the file is as it was first written");
+
     // Without a camera a calibration cannot be done: the run is given a page, fails, says so,
     // and the page that covered the screen is gone again without anybody closing it.
     press(Action::Calibrate);

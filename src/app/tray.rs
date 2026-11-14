@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::control::controller::PointingMode;
 use crate::error::{Context, Error, Result};
 use crate::geometry::RectI;
 use crate::platform::camera::CameraRequest;
@@ -32,6 +33,7 @@ use super::icon::{self, Look};
 use super::log::Log;
 use super::pipeline::{CalibrationProblem, Notice, Pipeline, Setup, Status};
 use super::preview::PreviewWindow;
+use super::settings;
 use super::storage::Storage;
 use super::wording::{self, Message};
 
@@ -59,12 +61,15 @@ pub enum Action {
     Pause = 1,
     Calibrate,
     Preview,
+    /// Switches between pointing with the head and with the eyes.
+    Pointing,
     Settings,
     Quit,
 }
 
 impl Action {
-    const ALL: [Action; 5] = [Action::Pause, Action::Calibrate, Action::Preview, Action::Settings, Action::Quit];
+    const ALL: [Action; 6] =
+        [Action::Pause, Action::Calibrate, Action::Preview, Action::Pointing, Action::Settings, Action::Quit];
 
     fn from_id(id: u32) -> Option<Action> {
         Action::ALL.into_iter().find(|&action| action as u32 == id)
@@ -157,6 +162,8 @@ struct App {
     pipeline: Pipeline,
     storage: Storage,
     log: Log,
+    /// What moves the cursor, as the worker was last told. The settings file says the same.
+    pointing: PointingMode,
     /// The worker's status as last shown.
     status: Status,
     taskbar_created: u32,
@@ -185,13 +192,14 @@ impl App {
         let camera = CameraRequest { device_index: options.camera.unwrap_or(settings.camera), ..CameraRequest::default() };
         log.line(&format!("camera {}", camera.device_index));
         let poster = Poster::new(window, FROM_WORKER);
+        let pointing = settings.tuning.pointing;
         let setup = Setup { camera, tuning: settings.tuning, storage: storage.clone() };
         let pipeline = Pipeline::start(setup, move || {
             poster.post();
         })?;
         let taskbar_created = window::registered_message(TASKBAR_CREATED);
         let mut app =
-            App { window, icon, pipeline, storage, log, status, taskbar_created, calibration: None, preview: None };
+            App { window, icon, pipeline, storage, log, pointing, status, taskbar_created, calibration: None, preview: None };
         if problems.is_empty() {
             app.show(&wording::started(app.storage.has_calibration()));
         } else {
@@ -270,6 +278,7 @@ impl App {
             item(Action::Calibrate, calibrate, false),
             item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
+            item(Action::Pointing, wording::MENU_EYE_POINTING, self.pointing == PointingMode::Eye),
             item(Action::Settings, wording::MENU_SETTINGS, false),
             MenuItem::Separator,
             item(Action::Quit, wording::MENU_QUIT, false),
@@ -287,6 +296,7 @@ impl App {
             Some(Action::Calibrate) => self.start_calibration(),
             Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
             Some(Action::Preview) => self.open_preview(),
+            Some(Action::Pointing) => self.switch_pointing(),
             Some(Action::Settings) => self.open_settings(),
             Some(Action::Quit) => {
                 self.log.line("quit by the person");
@@ -295,6 +305,26 @@ impl App {
             None => {}
         }
         Flow::Continue
+    }
+
+    /// Hands pointing from the head to the eyes or back: at once for the worker, and in the
+    /// settings file for the next start. A choice that could not be written down still holds
+    /// until the program ends, and the person is told that it will not last.
+    fn switch_pointing(&mut self) {
+        let pointing = match self.pointing {
+            PointingMode::Head => PointingMode::Eye,
+            PointingMode::Eye => PointingMode::Head,
+        };
+        self.pointing = pointing;
+        self.pipeline.set_pointing(pointing);
+        self.log.line(&format!("pointing set to {} by the person", settings::pointing_word(pointing)));
+        match self.storage.save_pointing(pointing) {
+            Err(error) => self.show(&wording::pointing_not_saved(error.message())),
+            Ok(()) if pointing == PointingMode::Eye && !self.storage.has_calibration() => {
+                self.show(&wording::eye_pointing_needs_calibration());
+            }
+            Ok(()) => {}
+        }
     }
 
     /// Opens the settings file in Notepad, which is on every machine and leaves the file as plain text.

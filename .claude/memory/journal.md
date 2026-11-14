@@ -105,3 +105,12 @@
 - Verification: `cargo test` 167 passed (both tests failed before), `cargo clippy --all-targets -- -D warnings` clean, `cargo test --release --test resident -- --ignored` 1 passed, 0 processes before and after.
 - Residual risk: the constants come from simulated noise only; nobody has pointed with their eyes yet. Eye mode has no fine adjustment by the head, so its accuracy is the estimate's (tens of pixels).
 - Learning: see `rules.md` "Control" (speed-adaptive filter).
+
+## 2026-11-14 - The pointing mode in the tray menu (#5)
+
+- Symptom: the person asked to set the pointing mode from the resident program itself; it could only be changed by editing `settings.txt` and starting again.
+- Root cause: the tuning was handed to the worker once, at start (`Setup`), and the settings file was only ever read. The program has no settings window: the menu's entry opens the file in Notepad.
+- Fix: a checked menu entry, `Action::Pointing` ("視線でカーソルを動かす"). The tray owns the choice, tells the worker (`Pipeline::set_pointing` -> `Command::SetPointing` -> `Engine::set_pointing`, which resets the controller like any break) and writes it down (`Storage::save_pointing`, using `settings::with_pointing`: only the `pointing` line changes, its comment and every other line stay, a file without the line gets it at the end, a file that is not text is left alone). Whether the gaze is read is now asked of the engine (`Engine::uses_gaze`) instead of being copied into the worker at start, where a switch would have left it stale. Choosing eye pointing without a calibration says so; a choice that cannot be saved holds until the program ends and says that.
+- Verification: `cargo test` 170 passed (new: the text edit with BOM, CRLF and comments and a round trip through `parse`; the file on disk; the engine switching both ways on a calibrated simulated person), clippy clean, the resident test now presses the entry twice and reads the log and the file, against the release build, 0 processes before and after.
+- Residual risk: only `pointing` is in the menu; the numbers still need the file and a restart. Editing the file in Notepad while switching in the menu: whichever saves last wins.
+- Learning: a value the owner can change later must have one place that holds it (here the engine's tuning); a copy made at start (`gaze_used`) is a second writer waiting to disagree.

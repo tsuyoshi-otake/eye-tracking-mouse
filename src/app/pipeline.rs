@@ -114,6 +114,7 @@ enum Command {
     StartCalibration { run: u32, area: RectI },
     CancelCalibration(u32),
     DisplayChanged,
+    SetPointing(PointingMode),
     Quit,
 }
 
@@ -280,6 +281,11 @@ impl Pipeline {
         self.send(Command::DisplayChanged);
     }
 
+    /// Changes what moves the cursor, from the next frame on. The setup's choice holds until then.
+    pub fn set_pointing(&self, pointing: PointingMode) {
+        self.send(Command::SetPointing(pointing));
+    }
+
     /// The current state, and the notices since the last call.
     pub fn take(&self) -> News {
         // Cleared before reading, so that anything written after the read announces itself again.
@@ -360,8 +366,6 @@ struct Worker<'a> {
     shared: &'a Shared,
     inbox: Receiver<Command>,
     request: CameraRequest,
-    /// Whether anything reads the gaze estimate: jumps in head mode, or eye pointing.
-    gaze_used: bool,
     storage: Storage,
     engine: Engine,
     desktop: Option<Desktop>,
@@ -394,7 +398,6 @@ impl<'a> Worker<'a> {
             shared,
             inbox,
             request: setup.camera,
-            gaze_used: setup.tuning.gaze_jump || setup.tuning.pointing == PointingMode::Eye,
             storage: setup.storage,
             engine: Engine::new(setup.tuning, calibration),
             desktop: Desktop::query().ok(),
@@ -488,6 +491,7 @@ impl<'a> Worker<'a> {
                 self.desktop = Desktop::query().ok();
                 self.end_calibration(CalibrationProblem::DisplayChanged);
             }
+            Command::SetPointing(pointing) => self.engine.set_pointing(pointing),
         }
         Flow::Continue
     }
@@ -583,8 +587,8 @@ impl<'a> Worker<'a> {
             cursor: pointer::cursor_position(),
             screens,
         });
-        let problem =
-            self.engine.calibration().filter(|_| self.gaze_used).and_then(|c| gaze_problem(c, frame_size, screens));
+        let gaze_used = self.engine.uses_gaze();
+        let problem = self.engine.calibration().filter(|_| gaze_used).and_then(|c| gaze_problem(c, frame_size, screens));
         let refused = self.act(&output);
         self.report(&output, problem, refused);
     }
