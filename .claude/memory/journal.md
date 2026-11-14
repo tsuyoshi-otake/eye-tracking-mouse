@@ -244,3 +244,9 @@
 - Verification: wording checked against wording.rs (start notification title), setup.iss ([Run] postinstall launch), LICENSE; anchors #設定とファイル, #謝辞ライセンス.
 - Published: PR #15 merged as a80de2d, branch deleted.
 - Learning: the X post was read through the public oEmbed endpoint (the x-api skill had no credentials); its text arrives cut at "…". No ffmpeg on this box: frames came from opencv-python-headless 4.11.0.86 in a throwaway venv under ~/tmp, deleted afterwards.
+
+## 2026-11-14 - Download warnings and a Pages guide (PR #16)
+- Work: README gets the download link at the top, an installer walkthrough, and 「ダウンロードや起動で警告が出たとき」 (no code signing: Edge "not commonly downloaded" -> … -> 保存/保持する; SmartScreen -> 詳細情報 -> 実行; SHA-256 check). docs/index.html: one-page guide for people new to computers; Pages enabled from main /docs (.nojekyll).
+- Verification: Pages status built; page, two images and the v0.3.0 setup.exe link answered 200. Edge button names are given with their alternatives because they differ between Edge versions (not checked on this box). Page not checked in a browser at phone width.
+- Published: PR #16 merged as 4fba6fb; https://tsuyoshi-otake.github.io/eye-tracking-mouse/
+- Learning: the first text said the files were built on GitHub; they are built on the author's PC (no CI). Corrected before commit — state provenance only from the release steps.
