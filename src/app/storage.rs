@@ -9,6 +9,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::control::calibration::Calibration;
 use crate::control::controller::PointingMode;
@@ -20,6 +21,7 @@ const FOLDER_NAME: &str = "eye-tracking-mouse";
 const SETTINGS_FILE: &str = "settings.txt";
 const CALIBRATION_FILE: &str = "calibration.txt";
 const LOG_FILE: &str = "log.txt";
+const RECORD_PREFIX: &str = "calibration-record-";
 
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -80,6 +82,12 @@ impl Storage {
         fs::write(&fresh, text)?;
         fs::rename(&fresh, self.folder.join(name))?;
         Ok(())
+    }
+
+    /// Keeps the record of a calibration run in a file of its own, named after the time it was written.
+    pub fn save_calibration_record(&self, text: &str) -> Result<()> {
+        let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        self.replace(&format!("{RECORD_PREFIX}{seconds}.txt"), text).context("write the calibration record")
     }
 
     /// Whether a calibration has been saved. It may still turn out to be unreadable.
@@ -155,6 +163,16 @@ mod tests {
         assert_eq!((loaded.camera, loaded.tuning.pointing, warnings), (3, PointingMode::Head, Vec::new()));
         let left: Vec<_> = fs::read_dir(&scratch.0).unwrap().map(|entry| entry.unwrap().file_name()).collect();
         assert_eq!(left, [SETTINGS_FILE], "no temporary file stays behind");
+
+        // A record of a calibration run goes next to it, under a name of its own.
+        storage.save_calibration_record("a record").unwrap();
+        let records: Vec<_> = fs::read_dir(&scratch.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with(RECORD_PREFIX) && name.ends_with(".txt"))
+            .collect();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(fs::read_to_string(scratch.0.join(&records[0])).unwrap(), "a record");
 
         // A file that is not text is not overwritten.
         fs::write(storage.settings_path(), [0xFF, 0xFE, 0x00, 0xD8]).unwrap();

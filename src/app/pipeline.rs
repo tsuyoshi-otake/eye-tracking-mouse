@@ -44,6 +44,7 @@ use super::backoff::Backoff;
 use super::engine::{Engine, GazeProblem, Input, Mode, Output, PointerAction, gaze_problem};
 use super::face::{self, Tracker};
 use super::preview::{self, Picture};
+use super::record::CalibrationRecord;
 use super::storage::Storage;
 
 /// How long `stop` waits for the worker.
@@ -106,6 +107,8 @@ pub struct Setup {
     pub camera: CameraRequest,
     pub tuning: Tuning,
     pub storage: Storage,
+    /// Keep a record of every calibration run that ends by itself.
+    pub record_calibration: bool,
 }
 
 enum Command {
@@ -381,6 +384,9 @@ struct Worker<'a> {
     /// The number of the run the engine is working on: there exactly while the engine is
     /// calibrating, and never together with a run that is waiting.
     run: Option<u32>,
+    record_wanted: bool,
+    /// The record of the run the engine is working on, when one is wanted.
+    record: Option<CalibrationRecord>,
     /// What the owner was last told about the gaze.
     gaze_problem: Option<GazeProblem>,
     announcer: Announcer,
@@ -408,6 +414,8 @@ impl<'a> Worker<'a> {
             gaps: 0,
             pending_calibration: None,
             run: None,
+            record_wanted: setup.record_calibration,
+            record: None,
             gaze_problem: None,
             announcer: Announcer::new(),
             frame: BgraFrame::default(),
@@ -507,12 +515,14 @@ impl<'a> Worker<'a> {
         if let Some((run, area)) = self.pending_calibration.take() {
             self.engine.start_calibration(area, frame_size, time);
             self.run = Some(run);
+            self.record = self.record_wanted.then(|| CalibrationRecord::begin(area, frame_size));
         }
     }
 
     /// Takes the run the engine is working on away from it. Returns its number, if there was one.
     fn abandon_run(&mut self) -> Option<u32> {
         self.engine.cancel_calibration();
+        self.record = None;
         self.run.take()
     }
 
@@ -590,6 +600,9 @@ impl<'a> Worker<'a> {
         let gaze_used = self.engine.uses_gaze();
         let problem = self.engine.calibration().filter(|_| gaze_used).and_then(|c| gaze_problem(c, frame_size, screens));
         let refused = self.act(&output);
+        if let (Mode::Calibrating(view), Some(record), true) = (&output.mode, &mut self.record, found) {
+            record.add(view, &self.mesh);
+        }
         self.report(&output, problem, refused);
     }
 
@@ -618,6 +631,14 @@ impl<'a> Worker<'a> {
         // The engine ends only a run it was working on, so the number is there whenever an outcome is.
         if let (Some(outcome), Some(run)) = (output.finished, self.run) {
             self.run = None;
+            if let Some(record) = self.record.take() {
+                let ending = match outcome {
+                    Ok(error_px) => format!("done {error_px}"),
+                    Err(failure) => format!("failed {failure:?}"),
+                };
+                // The record is an aid for whoever asked for it; the run's own outcome is what the person is told.
+                let _ = self.storage.save_calibration_record(&record.finish(&ending));
+            }
             self.shared.notice(match outcome {
                 Ok(error_px) => {
                     let saved = self.engine.calibration().map_or(Ok(()), |c| self.storage.save_calibration(c));
@@ -680,6 +701,7 @@ mod tests {
             camera: CameraRequest { device_index: NO_SUCH_CAMERA, ..CameraRequest::default() },
             tuning: Tuning::default(),
             storage: Storage::open(&scratch.0).unwrap(),
+            record_calibration: false,
         };
         (scratch, setup)
     }
