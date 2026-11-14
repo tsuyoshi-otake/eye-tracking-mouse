@@ -56,6 +56,8 @@ pub const MENU_RESUME: &str = "再開\tCtrl+Alt+P";
 pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
 pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
+/// Checked while the eyes move the cursor; unchecked, the head does.
+pub const MENU_EYE_POINTING: &str = "視線でカーソルを動かす（eye tracking）";
 pub const MENU_SETTINGS: &str = "設定ファイルを開く（再起動で反映）";
 pub const MENU_QUIT: &str = "終了\tCtrl+Alt+Q";
 
@@ -80,6 +82,24 @@ pub fn hotkey_taken(key: char) -> String {
 
 pub fn settings_not_opened(path: &str, reason: &str) -> Message {
     Message { title: "設定ファイルを開けません", text: format!("{path}（{reason}）"), warning: true }
+}
+
+/// Shown when eye pointing is chosen and there is no calibration for it to work with.
+pub fn eye_pointing_needs_calibration() -> Message {
+    Message {
+        title: "キャリブレーションが必要です",
+        text: "視線でカーソルを動かすには Ctrl+Alt+C でキャリブレーションします。それまでは頭の動きで動かします。".to_string(),
+        warning: false,
+    }
+}
+
+/// Shown when the choice of pointing made in the menu holds only until the program ends.
+pub fn pointing_not_saved(reason: &str) -> Message {
+    Message {
+        title: "設定を保存できません",
+        text: format!("切り替えは今回の起動中だけ有効です。（{reason}）"),
+        warning: true,
+    }
 }
 
 /// Shown when the worker stops pointing for a reason the person should know about.
@@ -239,6 +259,8 @@ mod tests {
         fits(&startup_problems(&many));
         fits(&startup_problems(&many[..1]));
         fits(&window_not_opened(&reason()));
+        fits(&eye_pointing_needs_calibration());
+        fits(&pointing_not_saved(&reason()));
     }
 
     #[test]

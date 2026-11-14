@@ -119,6 +119,46 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
     (settings, warnings)
 }
 
+/// How a pointing mode is written in the file.
+pub fn pointing_word(mode: PointingMode) -> &'static str {
+    match mode {
+        PointingMode::Head => "head",
+        PointingMode::Eye => "eye",
+    }
+}
+
+/// The settings file's `text` with the pointing mode set to `mode`. Every line
+/// that sets it gets the new value and keeps its comment; a text without such
+/// a line gets one at the end. Nothing else in the text changes.
+pub fn with_pointing(text: &str, mode: PointingMode) -> String {
+    let word = pointing_word(mode);
+    let mut changed = String::with_capacity(text.len() + 32);
+    let mut found = false;
+    // A byte-order mark in front of the first line is not part of it, as in `parse`.
+    let lines = text.trim_start_matches('\u{feff}');
+    changed.push_str(&text[..text.len() - lines.len()]);
+    for raw in lines.split_inclusive('\n') {
+        let body = raw.trim_end_matches(['\r', '\n']);
+        let (setting, comment) = body.split_at(body.find('#').unwrap_or(body.len()));
+        let name_at = setting.len() - setting.trim_start().len();
+        if setting[name_at..].split_once('=').is_some_and(|(name, _)| name.trim() == "pointing") {
+            found = true;
+            let gap = if comment.is_empty() { "" } else { " " };
+            changed.push_str(&format!("{}pointing = {word}{gap}{comment}{}", &setting[..name_at], &raw[body.len()..]));
+        } else {
+            changed.push_str(raw);
+        }
+    }
+    if !found {
+        let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        if !changed.is_empty() && !changed.ends_with('\n') {
+            changed.push_str(ending);
+        }
+        changed.push_str(&format!("pointing = {word}{ending}"));
+    }
+    changed
+}
+
 /// The file written when there is none yet: every setting at its default, explained.
 pub fn template() -> String {
     let Settings { camera, tuning } = Settings::default();
@@ -168,10 +208,7 @@ blink_limit = {limit}
 # 目を「閉じた」とみなす開き具合（ふだんの開きに対する割合、0.2〜0.8）
 blink_closed = {closed}
 ",
-        pointing = match tuning.pointing {
-            PointingMode::Head => "head",
-            PointingMode::Eye => "eye",
-        },
+        pointing = pointing_word(tuning.pointing),
         gaze_jump = on_off(tuning.gaze_jump),
         blink_click = on_off(tuning.blink_click),
         slow = tuning.head_gain.slow,
@@ -228,6 +265,43 @@ mod tests {
         let (settings, warnings) = parse("pointing = gaze\n");
         assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Head, 1));
         assert!(warnings[0].contains("head か eye"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn setting_the_pointing_mode_in_a_text_changes_that_line_and_nothing_else() {
+        // The template's own line, among everything else it says.
+        let template = template();
+        let eye = with_pointing(&template, PointingMode::Eye);
+        assert_eq!(eye, template.replace("\npointing = head\n", "\npointing = eye\n"));
+        assert_eq!(with_pointing(&eye, PointingMode::Head), template, "and back again");
+
+        // A person's own file: spacing, a comment on the line, Windows line ends, a mark in front.
+        let own = "\u{feff}  pointing=head   # what moves the cursor\r\ncamera = 2\r\n# pointing = eye would be the other\r\n";
+        let changed = with_pointing(own, PointingMode::Eye);
+        assert_eq!(changed, "\u{feff}  pointing = eye # what moves the cursor\r\ncamera = 2\r\n# pointing = eye would be the other\r\n");
+
+        // A file from before the setting existed gets the line at its end, in its own line ends.
+        assert_eq!(with_pointing("camera = 1", PointingMode::Eye), "camera = 1\npointing = eye\n");
+        assert_eq!(with_pointing("camera = 1\r\n", PointingMode::Eye), "camera = 1\r\npointing = eye\r\n");
+        assert_eq!(with_pointing("", PointingMode::Head), "pointing = head\n");
+
+        // Whatever the text was, reading the result gives the mode asked for and the rest as before.
+        // A mark anywhere but at the very start makes a line `parse` cannot use: it is left
+        // alone and the setting goes on a line of its own.
+        let marked = "camera = 1\n\u{feff}pointing = head\n";
+        assert_eq!(with_pointing(marked, PointingMode::Eye), format!("{marked}pointing = eye\n"));
+        let texts = [template.as_str(), "camera = 1", "pointing = eye\npointing = head\ncamera = 3\n", "pointing = nonsense\n"];
+        for text in texts.into_iter().chain([marked, "  \u{feff}pointing = head\n", "\u{feff}\u{feff}pointing = head"]) {
+            for mode in [PointingMode::Head, PointingMode::Eye] {
+                let (before, _) = parse(text);
+                let (after, warnings) = parse(&with_pointing(text, mode));
+                assert_eq!(after.tuning.pointing, mode, "{text:?}");
+                assert_eq!(after.camera, before.camera, "{text:?}");
+                // The line with a misplaced mark is still there, and still reported.
+                let unusable = text.contains("\n\u{feff}") || text.starts_with(' ');
+                assert_eq!(warnings.len(), usize::from(unusable), "{text:?}: {warnings:?}");
+            }
+        }
     }
 
     #[test]

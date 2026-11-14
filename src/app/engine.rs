@@ -15,7 +15,7 @@
 //!   it ends, or with `cancel_calibration` returning true.
 
 use crate::control::calibration::{Calibration, CalibrationSession, Failure, Step, View};
-use crate::control::controller::{Activity, Controller, Frame, Sound, Tuning};
+use crate::control::controller::{Activity, Controller, Frame, PointingMode, Sound, Tuning};
 use crate::geometry::RectI;
 use crate::vision::landmarks::FaceMesh;
 use crate::vision::pose::{ReferenceBuilder, ReferenceShape};
@@ -107,6 +107,19 @@ impl Engine {
 
     pub fn calibration(&self) -> Option<&Calibration> {
         self.calibration.as_ref()
+    }
+
+    /// Whether anything reads the gaze estimate: jumps in head mode, or eye pointing.
+    pub fn uses_gaze(&self) -> bool {
+        self.tuning.gaze_jump || self.tuning.pointing == PointingMode::Eye
+    }
+
+    /// Changes what moves the cursor. Pointing starts afresh, as after any break.
+    pub fn set_pointing(&mut self, pointing: PointingMode) {
+        if self.tuning.pointing != pointing {
+            self.tuning.pointing = pointing;
+            self.interrupt();
+        }
     }
 
     /// For tests: what the program itself needs to know it reads from `Output::mode`.
@@ -322,6 +335,27 @@ mod tests {
         desk.gaze_at(0.5, MIDDLE, 1.0);
         desk.gaze_at(0.6, far, 1.0);
         assert!(desk.distance_to(far) < 200.0, "the cursor went to {:?}", desk.cursor);
+        assert!(desk.clicks.is_empty());
+    }
+
+    #[test]
+    fn switching_to_eye_pointing_takes_effect_on_the_next_frames_and_back_again() {
+        let mut desk = Desk::new(Some(calibrated()));
+        let near = Vec2::new(1450.0, 640.0);
+        desk.gaze_at(1.0, MIDDLE, 1.0);
+        desk.gaze_at(1.0, near, 1.0);
+        assert!(desk.distance_to(near) > 120.0, "in head mode a look this near moves nothing: {:?}", desk.cursor);
+        assert!(desk.engine.uses_gaze(), "the jump reads the gaze");
+
+        desk.engine.set_pointing(PointingMode::Eye);
+        desk.gaze_at(2.0, near, 1.0);
+        assert!(desk.distance_to(near) < 120.0, "in eye mode the cursor is where the person looks: {:?}", desk.cursor);
+
+        desk.engine.set_pointing(PointingMode::Head);
+        let held = desk.cursor;
+        desk.gaze_at(1.0, MIDDLE, 1.0);
+        let moved = Vec2::new(desk.cursor.0 as f32, desk.cursor.1 as f32).distance(Vec2::new(held.0 as f32, held.1 as f32));
+        assert!(moved < 60.0, "back in head mode a near look moves next to nothing: {held:?} to {:?}", desk.cursor);
         assert!(desk.clicks.is_empty());
     }
 
