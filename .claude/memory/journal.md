@@ -197,3 +197,12 @@
 - Not changed: probes need the cursor exactly on the pixel; on a desktop where absolute moves land a pixel off, control would never resume. `absolute_coordinate` is tested for one extent only.
 - First run by the person: calibration 98 px (its own estimate), first check 127 px, second check 95 px.
 - Learning: state that says "this is not ours to touch" must outlive every reset of the thing that would touch it.
+
+## 2026-11-14 - Four checks on a person: the added correction is not shown to work (#7)
+
+- Measured: calibration 98 px (own estimate), then checks 127, 95, 88, 103 px. I told the person after the third that the correction was working. That was wrong.
+- How it was found: the lessons in `calibration.txt` are enough to replay every check without the program. The model without any check's lessons gives 127, 93, 73, 117 px on the same four checks; with them, as the program did, 127, 95, 88, 102. The differences (+2, +15, -15) have no direction.
+- What moves the numbers instead: the mean miss of each check under one fixed model goes (-3, -88), (-1, 3), (-29, -4), (55, 72) px within about four minutes. The estimate as a whole drifts, and twelve places a few minutes old do not predict where it will be.
+- Also found: answers are pulled toward the middle (top third +50 px down, bottom third -70 px up, left +25, right -38) with all 48 check places and 25 grid places fitted. Fitting to the mean of each place's frames instead of every frame, or a ridge 10 or 100 times weaker, does not remove it, so it is not regression dilution and not the penalty.
+- Prior work looked up: WebGazer (clicks as calibration, 100 to 200 px), SPAZE (2.70 degrees with 9 samples on MPIIGaze), FAZE (3.18 degrees), MAGIC pointing (gaze brings the cursor near, the hand finishes), pursuit calibration. At an assumed 60 cm one degree is about 34 px here, so about 100 px is about 3 degrees: the same order as single-camera research, three times an infrared tracker. Written into the README with the measured table.
+- Learning: a falling series of three numbers is not an effect until the same series has been computed without the change. The data to do that was already on disk; compute the counterfactual before telling the person it works.
