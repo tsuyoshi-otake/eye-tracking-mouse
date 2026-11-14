@@ -107,7 +107,7 @@ pub struct Setup {
     pub camera: CameraRequest,
     pub tuning: Tuning,
     pub storage: Storage,
-    /// Keep a record of every calibration run that ends by itself.
+    /// Keep a record of every calibration run, however it ends.
     pub record_calibration: bool,
     /// Keep a record of pointing.
     pub record_pointing: bool,
@@ -537,7 +537,10 @@ impl<'a> Worker<'a> {
     /// Takes the run the engine is working on away from it. Returns its number, if there was one.
     fn abandon_run(&mut self) -> Option<u32> {
         self.engine.cancel_calibration();
-        self.record = None;
+        // A run that was broken off is the one somebody will want to look into: its record is kept too.
+        if let Some(record) = self.record.take() {
+            let _ = self.storage.save_calibration_record(&record.finish("abandoned"));
+        }
         self.run.take()
     }
 
