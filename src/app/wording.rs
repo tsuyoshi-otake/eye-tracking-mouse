@@ -57,6 +57,9 @@ pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
 pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
 pub const MENU_CHECK: &str = "追加補正テスト\tCtrl+Alt+T";
 pub const MENU_CHECK_STOP: &str = "追加補正テストを中止\tCtrl+Alt+T";
+/// The other entry's key while a run is going: it ends that run too.
+pub const MENU_CALIBRATE_STOP_SHORT: &str = "キャリブレーションを中止\tCtrl+Alt+T";
+pub const MENU_CHECK_STOP_SHORT: &str = "追加補正テストを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
 /// What moves the cursor; the one in use is checked.
 pub const MENU_POINT_HEAD: &str = "頭で動かす（遠くを見るとジャンプ）";
@@ -124,6 +127,8 @@ pub fn trouble(status: &Status) -> Option<Message> {
 }
 
 const RETRY: &str = "Ctrl+Alt+C でやり直せます。";
+/// After a run that failed: which key starts which run again.
+const RUN_AGAIN: &str = "キャリブレーションは Ctrl+Alt+C、追加補正テストは Ctrl+Alt+T でやり直せます。";
 
 /// Shown when a calibration run ended without a result.
 pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
@@ -150,7 +155,7 @@ pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
             };
         }
     };
-    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RETRY}"), warning: true }
+    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RUN_AGAIN}"), warning: true }
 }
 
 pub fn notice(notice: &Notice) -> Message {
@@ -170,8 +175,8 @@ pub fn notice(notice: &Notice) -> Message {
             warning: false,
         },
         Notice::CalibrationDone { saved: Err(reason), .. } => Message {
-            title: "キャリブレーション完了（保存に失敗）",
-            text: format!("終了するまでは使えますが、次回の起動時にはやり直しが必要です。（{reason}）"),
+            title: "完了（保存に失敗）",
+            text: format!("今回の結果は終了するまで使えますが、ファイルに保存できなかったので次回の起動時には残りません。（{reason}）"),
             warning: true,
         },
         Notice::CalibrationFailed { problem, .. } => calibration_failed(problem),

@@ -169,7 +169,7 @@ impl Engine {
 
     /// Tells the engine that the frames to come do not continue the ones before.
     pub fn interrupt(&mut self) {
-        self.controller = Controller::default();
+        self.controller.restart();
     }
 
     pub fn frame(&mut self, input: &Input) -> Output {

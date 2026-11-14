@@ -203,7 +203,11 @@ impl Calibration {
                 }
                 let mut inputs = [0.0f64; FEATURES];
                 inputs.copy_from_slice(&row[..FEATURES]);
-                lessons.push(Lesson { inputs, target: Vec2::new(row[FEATURES] as f32, row[FEATURES + 1] as f32) });
+                let target = Vec2::new(row[FEATURES] as f32, row[FEATURES + 1] as f32);
+                if !target.is_finite() {
+                    return Err(Error::new(format!("a 'row' needs {ROW_NUMBERS} numbers")));
+                }
+                lessons.push(Lesson { inputs, target });
                 continue;
             }
             if fields.insert(name.trim(), values.trim()).is_some() {
@@ -524,7 +528,9 @@ impl CalibrationSession {
             }
             Stage::Score { .. } => return Step::Running(self),
             // A check that cannot go on ends with the places it got to, if it got to any.
-            Stage::Check { calibration, misses, seen, .. } if stuck || gone => {
+            Stage::Check { calibration, misses, mut seen, .. } if stuck || gone => {
+                // The place it stopped at was not measured to the end: its frames are not learned from.
+                seen.retain(|sample| sample.place < Some(misses.len()));
                 return match score(self.area, &misses) {
                     Some(score) => Step::Done(learned(*calibration, seen, score)),
                     None => Step::Failed(if gone { Failure::FaceLost } else { Failure::TooSlow }),
@@ -899,7 +905,8 @@ mod tests {
             let Step::Done(calibration) = outcome else { panic!("three places were measured before the trouble began") };
             assert!((1..CHECK_PLACES).contains(&calibration.training.checked), "{}", calibration.training.checked);
             assert_ne!(calibration.gaze, before.gaze, "it learned from the places it got to");
-            assert!(calibration.training.lessons.len() > before.training.lessons.len());
+            let added = calibration.training.lessons.len() - before.training.lessons.len();
+            assert!((1..=calibration.training.checked * CHECK_FRAMES).contains(&added), "only whole places: {added}");
             assert!(seconds < 8.0 + STAGE_LIMIT + 1.0, "ended at {seconds} s");
             assert_eq!(scores, 0, "no score is shown for a check that was broken off");
         }
@@ -1060,6 +1067,7 @@ mod tests {
         assert!(reason("").contains("this version"));
         assert!(reason(&text.replace("calibration 4", "calibration 3")).contains("this version"));
         assert!(reason(&format!("{text}row = 1 2 3\n")).contains("a 'row' needs 14 numbers"));
+        assert!(reason(&format!("{text}row = {}1e300\n", "0 ".repeat(13))).contains("a 'row' needs 14 numbers"));
         assert!(reason(&format!("{text}row = {}\n", vec!["x"; 14].join(" "))).contains("a 'row' needs 14 numbers"));
         assert!(reason(&text.replace(&format!("{}\n", text.lines().find(|line| line.starts_with("open")).unwrap()), "open = 0 0.2\n")).contains("eye size"));
         assert!(reason(&text.replace("error_px", "error")).contains("'error_px' is missing"));

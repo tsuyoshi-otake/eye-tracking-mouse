@@ -288,9 +288,12 @@ impl App {
     fn menu(&self) -> Vec<MenuItem<'static>> {
         let pause = if self.pipeline.is_paused() { wording::MENU_RESUME } else { wording::MENU_PAUSE };
         let running = self.calibration.as_ref().map(|run| run.routine);
-        let stops = |routine, stop, start| if running == Some(routine) { stop } else { start };
-        let calibrate = stops(Routine::Calibration, wording::MENU_CALIBRATE_STOP, wording::MENU_CALIBRATE);
-        let check = stops(Routine::Check, wording::MENU_CHECK_STOP, wording::MENU_CHECK);
+        // While one of the two runs, either entry ends it, and says so.
+        let (calibrate, check) = match running {
+            Some(Routine::Calibration) => (wording::MENU_CALIBRATE_STOP, wording::MENU_CALIBRATE_STOP_SHORT),
+            Some(Routine::Check) => (wording::MENU_CHECK_STOP_SHORT, wording::MENU_CHECK_STOP),
+            None => (wording::MENU_CALIBRATE, wording::MENU_CHECK),
+        };
         let item = |action: Action, label, checked| MenuItem::Action { id: action as u32, label, checked };
         vec![
             item(Action::Pause, pause, false),

@@ -202,6 +202,12 @@ impl Controller {
         sound
     }
 
+    /// Forgets everything about the frames before, except whose the cursor is: a cursor that
+    /// was yielded stays yielded, and is asked for with a probe like any other.
+    pub fn restart(&mut self) {
+        *self = Controller { guard: std::mem::take(&mut self.guard), ..Controller::default() };
+    }
+
     pub fn step(&mut self, frame: &Frame, tuning: &Tuning) -> Decision {
         let time = frame.time;
         let Some(actual) = frame.cursor else {
@@ -556,6 +562,12 @@ mod tests {
         assert!(sent.iter().all(|step| step.0.abs() == 1 && step.1 == 0), "{sent:?}");
         assert!(sent.windows(2).all(|pair| pair[0].0 + pair[1].0 == 0), "{sent:?}");
         assert!(desk.clicks.is_empty());
+        // Starting over (a gap in the frames, another pointing mode) does not take the cursor back unasked.
+        let (moves, far) = (desk.moves, desk.at());
+        desk.controller.restart();
+        desk.cursor = Some(parked);
+        desk.turn(20, 0.2, 0.25, OPEN);
+        assert!(desk.moves - moves <= 1 && (desk.at().0 - parked.0).abs() <= 1, "{:?} after {far:?}", desk.at());
         // Back on this computer the cursor obeys again, and the head has it after one more pixel.
         desk.rest(60, 0.0, OPEN);
         assert_eq!(desk.activity, Activity::Tracking);
