@@ -62,6 +62,8 @@ pub enum Action {
     Calibrate,
     /// Check the calibration there is and add what the check finds to it.
     Check,
+    /// Fit the head pointer's speeds to how far the person turns their head.
+    HeadCalibrate,
     Preview,
     /// What moves the cursor: the head, the eyes, or the eyes with the head correcting.
     PointHead,
@@ -72,10 +74,11 @@ pub enum Action {
 }
 
 impl Action {
-    const ALL: [Action; 9] = [
+    const ALL: [Action; 10] = [
         Action::Pause,
         Action::Calibrate,
         Action::Check,
+        Action::HeadCalibrate,
         Action::Preview,
         Action::PointHead,
         Action::PointEye,
@@ -89,9 +92,26 @@ impl Action {
     }
 }
 
-/// Ctrl+Alt+letter for the actions that have a hotkey.
-const HOTKEYS: [(Action, char); 4] =
-    [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Check, 'T'), (Action::Quit, 'Q')];
+/// Ctrl+Alt+letter for the actions that have a hotkey. The texts in `wording` name these letters.
+const HOTKEYS: [(Action, char); 5] =
+    [(Action::Pause, 'P'), (Action::Calibrate, 'C'), (Action::Check, 'T'), (Action::HeadCalibrate, 'H'), (Action::Quit, 'Q')];
+
+/// The action that starts a run of `routine`.
+fn starter(routine: Routine) -> Action {
+    match routine {
+        Routine::Calibration => Action::Calibrate,
+        Routine::Check => Action::Check,
+        Routine::Head => Action::HeadCalibrate,
+    }
+}
+
+/// The letter of the hotkey that starts (and ends) a run of `routine`.
+fn run_key(routine: Routine) -> char {
+    let action = starter(routine);
+    HOTKEYS.iter().find(|(with, _)| *with == action).map_or('?', |&(_, key)| key)
+}
+
+const ROUTINES: [Routine; 3] = [Routine::Calibration, Routine::Check, Routine::Head];
 
 #[derive(PartialEq, Eq)]
 enum Flow {
@@ -261,7 +281,9 @@ impl App {
             Event::Timer(window, _) if self.shows_page(window) => self.watch_camera(),
             Event::Message { window, message, lparam, .. } if window == self.window => match message {
                 FROM_ICON if notify_icon::wants_menu(lparam) => {
-                    let chosen = self.icon.menu(&self.menu());
+                    let running = self.calibration.as_ref().map(|run| run.routine);
+                    let runs = ROUTINES.map(|routine| wording::menu_run(routine, run_key(routine), running));
+                    let chosen = self.icon.menu(&self.menu(&runs));
                     return self.perform(chosen.and_then(Action::from_id));
                 }
                 FROM_WORKER => self.news(),
@@ -285,20 +307,16 @@ impl App {
         Flow::Continue
     }
 
-    fn menu(&self) -> Vec<MenuItem<'static>> {
+    /// The icon's menu. `runs` are the labels of the entries that start the runs, in the order of `ROUTINES`.
+    fn menu<'a>(&self, runs: &'a [String; 3]) -> Vec<MenuItem<'a>> {
         let pause = if self.pipeline.is_paused() { wording::MENU_RESUME } else { wording::MENU_PAUSE };
-        let running = self.calibration.as_ref().map(|run| run.routine);
-        // While one of the two runs, either entry ends it, and says so.
-        let (calibrate, check) = match running {
-            Some(Routine::Calibration) => (wording::MENU_CALIBRATE_STOP, wording::MENU_CALIBRATE_STOP_SHORT),
-            Some(Routine::Check) => (wording::MENU_CHECK_STOP_SHORT, wording::MENU_CHECK_STOP),
-            None => (wording::MENU_CALIBRATE, wording::MENU_CHECK),
-        };
         let item = |action: Action, label, checked| MenuItem::Action { id: action as u32, label, checked };
+        let [calibrate, check, head] = runs;
         vec![
             item(Action::Pause, pause, false),
             item(Action::Calibrate, calibrate, false),
             item(Action::Check, check, false),
+            item(Action::HeadCalibrate, head, false),
             item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
             item(Action::PointHead, wording::MENU_POINT_HEAD, self.pointing == PointingMode::Head),
@@ -318,10 +336,13 @@ impl App {
                 self.pipeline.set_paused(paused);
                 self.log.line(if paused { "paused by the person" } else { "resumed by the person" });
             }
-            // Whichever of the two is running, either key ends it: the page covers the screen.
-            Some(Action::Calibrate | Action::Check) if self.calibration.is_some() => self.cancel_calibration(),
+            // Whichever run is going, any of their keys ends it: the page covers the screen.
+            Some(Action::Calibrate | Action::Check | Action::HeadCalibrate) if self.calibration.is_some() => {
+                self.cancel_calibration();
+            }
             Some(Action::Calibrate) => self.start_run(Routine::Calibration),
             Some(Action::Check) => self.start_run(Routine::Check),
+            Some(Action::HeadCalibrate) => self.start_run(Routine::Head),
             Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
             Some(Action::Preview) => self.open_preview(),
             Some(Action::PointHead) => self.choose_pointing(PointingMode::Head),
@@ -379,8 +400,9 @@ impl App {
             return;
         }
         let (frames, now) = (self.pipeline.frames(), runtime::seconds());
+        let hint = wording::how_to_cancel(run_key(routine));
         let opened = screen_under_pointer()
-            .and_then(|area| CalibrationScreen::open(VIEW_CLASS, area, frames, now).map(|page| (area, page)));
+            .and_then(|area| CalibrationScreen::open(VIEW_CLASS, area, hint, frames, now).map(|page| (area, page)));
         match opened {
             Ok((area, page)) => {
                 let number = self.pipeline.start_run(routine, area);
@@ -410,9 +432,10 @@ impl App {
     /// quiet must not leave the person in front of a page that covers their screen.
     fn watch_camera(&mut self) {
         let (frames, now) = (self.pipeline.frames(), runtime::seconds());
-        if self.calibration.as_mut().is_some_and(|run| run.page.camera_is_silent(frames, now)) {
+        let silent = self.calibration.as_mut().and_then(|run| run.page.camera_is_silent(frames, now).then_some(run.routine));
+        if let Some(routine) = silent {
             self.close_calibration();
-            self.show(&wording::calibration_failed(&CalibrationProblem::Camera(CAMERA_SILENT.to_string())));
+            self.show(&wording::calibration_failed(routine, &CalibrationProblem::Camera(CAMERA_SILENT.to_string())));
         }
     }
 
@@ -460,7 +483,9 @@ impl App {
         for notice in &news.notices {
             self.show(&wording::notice(notice));
             let ended = match notice {
-                Notice::CalibrationDone { run, .. } | Notice::CalibrationFailed { run, .. } => Some(*run),
+                Notice::CalibrationDone { run, .. }
+                | Notice::HeadCalibrated { run, .. }
+                | Notice::CalibrationFailed { run, .. } => Some(*run),
                 _ => None,
             };
             // The run on the page is over, so the page has nothing more to show.
@@ -533,6 +558,21 @@ mod tests {
         assert_eq!(Action::from_id(0), None);
         assert_eq!(Action::from_id(Action::ALL.len() as u32 + 1), None);
         assert!(HOTKEYS.iter().all(|(action, key)| Action::ALL.contains(action) && key.is_ascii_uppercase()));
+        let keys: std::collections::HashSet<char> = HOTKEYS.iter().map(|&(_, key)| key).collect();
+        assert_eq!(keys.len(), HOTKEYS.len(), "no two actions share a key");
+    }
+
+    #[test]
+    fn every_run_has_its_own_key_and_the_texts_name_the_right_one() {
+        // The notices and the page name these letters in so many words.
+        assert_eq!(ROUTINES.map(run_key), ['C', 'T', 'H']);
+        assert_eq!(ROUTINES.map(starter), [Action::Calibrate, Action::Check, Action::HeadCalibrate]);
+        let idle = ROUTINES.map(|routine| wording::menu_run(routine, run_key(routine), None));
+        assert_eq!(idle, ["視線のキャリブレーション\tCtrl+Alt+C", "追加補正テスト\tCtrl+Alt+T", "頭のキャリブレーション\tCtrl+Alt+H"]);
+        // While the head is calibrated, every entry ends that run, each with its own key.
+        let busy = ROUTINES.map(|routine| wording::menu_run(routine, run_key(routine), Some(Routine::Head)));
+        assert!(busy.iter().all(|label| label.starts_with("頭のキャリブレーションを中止\t")), "{busy:?}");
+        assert_eq!(wording::how_to_cancel(run_key(Routine::Head)), "Esc または Ctrl+Alt+H で中止");
     }
 
     #[test]

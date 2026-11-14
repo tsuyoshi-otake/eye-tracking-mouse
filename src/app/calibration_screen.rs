@@ -51,8 +51,9 @@ const WATCH_INTERVAL: u32 = 250;
 const WATCH_TIMER: usize = 1;
 
 /// Everything on the page for the screen `area` (desktop pixels). `None` while the run has not begun.
-/// `score` is the line shown in place of a spot to look at once the view carries the check's outcome.
-pub fn scene<'a>(view: Option<&View>, score: &'a str, area: RectI) -> Vec<Shape<'a>> {
+/// `score` is the line shown in place of a spot to look at once the view carries the check's outcome,
+/// and `hint` the last line, which says how to get out.
+pub fn scene<'a>(view: Option<&View>, score: &'a str, hint: &'a str, area: RectI) -> Vec<Shape<'a>> {
     let (width, height) = (area.width(), area.height());
     let unit = width.min(height) as f32 / 100.0;
     // Small enough for the longest line to fit the width, and for a line to fit between two rows of the grid.
@@ -92,7 +93,7 @@ pub fn scene<'a>(view: Option<&View>, score: &'a str, area: RectI) -> Vec<Shape<
             }
         }
     }
-    shapes.push(line(wording::CALIBRATION_HOW_TO_CANCEL, HINT_AT, HINT));
+    shapes.push(line(hint, HINT_AT, HINT));
     shapes
 }
 
@@ -125,18 +126,20 @@ pub struct CalibrationScreen {
     window: Window,
     surface: Surface,
     area: RectI,
+    /// The last line: how to get out of this run.
+    hint: String,
     view: Option<View>,
     watch: Watch,
 }
 
 impl CalibrationScreen {
-    /// Covers the screen `area` (desktop pixels) and takes the keyboard.
+    /// Covers the screen `area` (desktop pixels) and takes the keyboard. `hint` says how to get out.
     /// `frames` is the worker's count of camera frames and `now` the time in seconds.
-    pub fn open(class: &str, area: RectI, frames: u64, now: f64) -> Result<CalibrationScreen> {
+    pub fn open(class: &str, area: RectI, hint: String, frames: u64, now: f64) -> Result<CalibrationScreen> {
         let window = window::open(class, wording::CALIBRATION_TITLE, Kind::Covering, area)?;
         // From here on the window goes with the value, also when something below fails.
-        let mut screen =
-            CalibrationScreen { window, surface: Surface::new(window), area, view: None, watch: Watch::new(frames, now) };
+        let (surface, watch) = (Surface::new(window), Watch::new(frames, now));
+        let mut screen = CalibrationScreen { window, surface, area, hint, view: None, watch };
         window::start_timer(window, WATCH_TIMER, WATCH_INTERVAL);
         window::show(window, true);
         screen.draw();
@@ -157,7 +160,7 @@ impl CalibrationScreen {
 
     pub fn draw(&mut self) {
         let score = self.view.and_then(|view| view.score).map(wording::check_score).unwrap_or_default();
-        self.surface.paint(BACKGROUND, &scene(self.view.as_ref(), &score, self.area));
+        self.surface.paint(BACKGROUND, &scene(self.view.as_ref(), &score, &self.hint, self.area));
     }
 
     /// Takes note of the worker's count of camera frames at time `now`
@@ -186,9 +189,11 @@ mod tests {
         View { phase, target, dwell, progress, face_visible: true, answer: None, score: None }
     }
 
+    const HINT_LINE: &str = "Esc または Ctrl+Alt+C で中止";
+
     /// The page for `view` on the second monitor, with no score to tell.
     fn scene(view: Option<&View>, area: RectI) -> Vec<Shape<'static>> {
-        super::scene(view, "", area)
+        super::scene(view, "", HINT_LINE, area)
     }
 
     fn texts<'a>(shapes: &[Shape<'a>]) -> Vec<&'a str> {
@@ -232,18 +237,18 @@ mod tests {
 
     #[test]
     fn each_part_of_the_run_says_what_to_do_and_how_to_stop() {
-        for phase in [Phase::Rest, Phase::Places, Phase::Sweep, Phase::Check] {
+        for phase in [Phase::Rest, Phase::Places, Phase::Sweep, Phase::Check, Phase::HeadRest, Phase::HeadLeft, Phase::HeadRight, Phase::HeadUp, Phase::HeadDown] {
             let shapes = scene(Some(&view(phase, (2880, 540), 0.3, 0.4)), AREA);
-            assert_eq!(texts(&shapes), [wording::instruction(phase), wording::CALIBRATION_HOW_TO_CANCEL]);
+            assert_eq!(texts(&shapes), [wording::instruction(phase), HINT_LINE]);
         }
         let hidden = View { face_visible: false, ..view(Phase::Places, (2880, 540), 0.3, 0.4) };
         assert_eq!(
             texts(&scene(Some(&hidden), AREA)),
-            [wording::instruction(Phase::Places), wording::FACE_NOT_VISIBLE, wording::CALIBRATION_HOW_TO_CANCEL]
+            [wording::instruction(Phase::Places), wording::FACE_NOT_VISIBLE, HINT_LINE]
         );
         // Before the camera delivers there is no place to look at yet, only how to get out.
         let waiting = scene(None, AREA);
-        assert_eq!(texts(&waiting), [wording::CALIBRATION_PREPARING, wording::CALIBRATION_HOW_TO_CANCEL]);
+        assert_eq!(texts(&waiting), [wording::CALIBRATION_PREPARING, HINT_LINE]);
         assert_eq!(waiting.len(), 2);
     }
 
@@ -280,7 +285,7 @@ mod tests {
     #[test]
     fn the_check_shows_the_models_answer_by_its_place_and_ends_with_the_score_alone() {
         let place = view(Phase::Check, (1920 + 700, 400), 1.0, 0.8);
-        let answered = |answer, hit| discs(&super::scene(Some(&View { answer: Some((answer, hit)), ..place }), "", AREA));
+        let answered = |answer, hit| discs(&super::scene(Some(&View { answer: Some((answer, hit)), ..place }), "", HINT_LINE, AREA));
         // The place stays on the page and the answer is drawn over it, where the model put it on this screen.
         let hit = answered((1920 + 720, 410), true);
         assert_eq!(hit.len(), 4);
@@ -294,8 +299,8 @@ mod tests {
         let line = wording::check_score(score);
         // The face no longer matters once the score is up, and there is nothing left to look at.
         let ended = View { score: Some(score), face_visible: false, ..place };
-        let shapes = super::scene(Some(&ended), &line, AREA);
-        assert_eq!(texts(&shapes), [line.as_str(), wording::CALIBRATION_HOW_TO_CANCEL]);
+        let shapes = super::scene(Some(&ended), &line, HINT_LINE, AREA);
+        assert_eq!(texts(&shapes), [line.as_str(), HINT_LINE]);
         assert!(discs(&shapes).is_empty());
         assert!(line.contains("9 / 12") && line.contains("71ピクセル"), "{line}");
     }

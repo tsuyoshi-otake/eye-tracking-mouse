@@ -94,7 +94,7 @@ fn view() -> Option<Window> {
 }
 
 #[test]
-#[ignore = "starts the resident program: notifications and windows appear and four hotkeys are taken for a few seconds"]
+#[ignore = "starts the resident program: notifications and windows appear and five hotkeys are taken for a few seconds"]
 fn the_resident_program_starts_obeys_and_quits_without_a_camera() {
     assert!(window::find(MAIN_CLASS).is_none(), "the program is already running; quit it before running this test");
     assert!(view().is_none(), "a window of the program is still open; close it before running this test");
@@ -187,6 +187,15 @@ pointing = head
     wait_until("the failed check in the log", 15, || log(&folder).contains("Check run 2 started") && failures() > before);
     wait_until("the page of the check to go", 5, || view().is_none());
     assert!(!log(&folder).contains("cancelled by the person"), "nobody cancelled the check");
+
+    // The head calibration is a run of its own too, and says it was the head's.
+    press(Action::HeadCalibrate);
+    wait_until("the failed head calibration in the log", 15, || {
+        let text = log(&folder);
+        text.contains("Head run 3 started") && text.contains("頭のキャリブレーションができませんでした")
+    });
+    wait_until("the page of the head calibration to go", 5, || view().is_none());
+    assert_eq!(settings(), first, "a head run that failed writes nothing");
 
     // The preview comes and goes when asked for, and goes when the person closes it: with Escape ...
     press(Action::Preview);

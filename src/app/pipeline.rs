@@ -10,7 +10,7 @@
 //!   as long as the program runs. `Status::Waiting` says what is wrong meanwhile.
 //! - Every calibration run has a number, handed out by `start_calibration`.
 //!   While the run is under way, `News::view` carries that number. The run
-//!   ends with exactly one `Notice::CalibrationDone` or
+//!   ends with exactly one `Notice::CalibrationDone`, `Notice::HeadCalibrated` or
 //!   `Notice::CalibrationFailed` carrying it, or without a word when
 //!   `cancel_calibration` was called for it, when a newer run was asked for,
 //!   or when the worker itself ended (`Status::Stopped`).
@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use crate::control::calibration::{Failure, View};
 use crate::control::controller::{Activity, PointingMode, Sound, Tuning};
+use crate::control::head_pointer::HeadGain;
 use crate::error::{Context, Error, Result};
 use crate::geometry::RectI;
 use crate::image::BgraFrame;
@@ -41,7 +42,7 @@ use crate::platform::sound::{Announcer, Cue};
 use crate::vision::landmarks::FaceMesh;
 
 use super::backoff::Backoff;
-use super::engine::{Engine, GazeProblem, Input, Mode, Output, PointerAction, gaze_problem};
+use super::engine::{Engine, GazeProblem, Input, Mode, Outcome, Output, PointerAction, gaze_problem};
 use super::face::{self, Tracker};
 use super::preview::{self, Picture};
 use super::record::{CalibrationRecord, PointingRecord};
@@ -83,20 +84,25 @@ pub enum CalibrationProblem {
     NotCalibrated,
 }
 
-/// What a run does: make a calibration, or check the one there is and add to it.
+/// What a run does: make a calibration of the gaze, check the one there is and add to it,
+/// or fit the head pointer to how far the person turns their head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Routine {
     Calibration,
     Check,
+    Head,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
-    /// Calibration run `run` succeeded. `saved` tells whether it will still be there after a restart.
+    /// Gaze calibration run `run` (`Calibration` or `Check`) succeeded. `saved` tells whether it will still be there after a restart.
     CalibrationDone { run: u32, routine: Routine, error_px: f32, saved: std::result::Result<(), String> },
-    /// Calibration run `run` ended without a result.
-    CalibrationFailed { run: u32, problem: CalibrationProblem },
-    /// The calibration cannot be used for gaze jumps as things are; pointing with the head goes on.
+    /// Head calibration run `run` succeeded and its speeds are in use. `saved` tells whether
+    /// the settings file has them for the next start.
+    HeadCalibrated { run: u32, gain: HeadGain, saved: std::result::Result<(), String> },
+    /// Calibration run `run` of `routine` ended without a result.
+    CalibrationFailed { run: u32, routine: Routine, problem: CalibrationProblem },
+    /// The calibration cannot be used for pointing with the eyes as things are; pointing with the head goes on.
     GazeUnavailable(GazeProblem),
     /// The saved calibration could not be read; the text says why.
     CalibrationUnreadable(String),
@@ -546,9 +552,13 @@ impl<'a> Worker<'a> {
                     true
                 }
                 Routine::Check => self.engine.start_check(area, frame_size, time),
+                Routine::Head => {
+                    self.engine.start_head_calibration(area, time);
+                    true
+                }
             };
             if !started {
-                self.shared.notice(Notice::CalibrationFailed { run, problem: CalibrationProblem::NotCalibrated });
+                self.shared.notice(Notice::CalibrationFailed { run, routine, problem: CalibrationProblem::NotCalibrated });
                 return;
             }
             self.routine = routine;
@@ -557,21 +567,21 @@ impl<'a> Worker<'a> {
         }
     }
 
-    /// Takes the run the engine is working on away from it. Returns its number, if there was one.
-    fn abandon_run(&mut self) -> Option<u32> {
+    /// Takes the run the engine is working on away from it. Returns its number and what it did, if there was one.
+    fn abandon_run(&mut self) -> Option<(u32, Routine)> {
         self.engine.cancel_calibration();
         // A run that was broken off is the one somebody will want to look into: its record is kept too.
         if let Some(record) = self.record.take() {
             let _ = self.storage.save_calibration_record(&record.finish("abandoned"));
         }
-        self.run.take()
+        self.run.take().map(|run| (run, self.routine))
     }
 
     /// Ends a calibration run that is under way or waiting to start, telling the owner why.
     fn end_calibration(&mut self, problem: CalibrationProblem) {
-        let waiting = self.pending_calibration.take().map(|(run, ..)| run);
-        if let Some(run) = self.abandon_run().or(waiting) {
-            self.shared.notice(Notice::CalibrationFailed { run, problem });
+        let waiting = self.pending_calibration.take().map(|(run, _, routine)| (run, routine));
+        if let Some((run, routine)) = self.abandon_run().or(waiting) {
+            self.shared.notice(Notice::CalibrationFailed { run, routine, problem });
         }
     }
 
@@ -675,19 +685,22 @@ impl<'a> Worker<'a> {
             self.run = None;
             if let Some(record) = self.record.take() {
                 let ending = match outcome {
-                    Ok(error_px) => format!("done {error_px}"),
+                    Ok(Outcome::Gaze { error_px }) => format!("done {error_px}"),
+                    Ok(Outcome::Head(gain)) => format!("head {} {} {}", gain.slow, gain.fast, gain.steadiness),
                     Err(failure) => format!("failed {failure:?}"),
                 };
                 // The record is an aid for whoever asked for it; the run's own outcome is what the person is told.
                 let _ = self.storage.save_calibration_record(&record.finish(&ending));
             }
+            let routine = self.routine;
+            let kept = |saved: Result<()>| saved.map_err(|error| error.message().to_string());
             self.shared.notice(match outcome {
-                Ok(error_px) => {
+                Ok(Outcome::Gaze { error_px }) => {
                     let saved = self.engine.calibration().map_or(Ok(()), |c| self.storage.save_calibration(c));
-                    let (routine, saved) = (self.routine, saved.map_err(|error| error.message().to_string()));
-                    Notice::CalibrationDone { run, routine, error_px, saved }
+                    Notice::CalibrationDone { run, routine, error_px, saved: kept(saved) }
                 }
-                Err(failure) => Notice::CalibrationFailed { run, problem: CalibrationProblem::Routine(failure) },
+                Ok(Outcome::Head(gain)) => Notice::HeadCalibrated { run, gain, saved: kept(self.storage.save_head_gain(&gain)) },
+                Err(failure) => Notice::CalibrationFailed { run, routine, problem: CalibrationProblem::Routine(failure) },
             });
         }
         if problem != self.gaze_problem {
@@ -762,7 +775,8 @@ mod tests {
         let mut worker = Worker::new(&shared, inbox, setup);
         let area = RectI::new(0, 0, 1920, 1080);
         let notices = || std::mem::take(&mut shared.board().notices);
-        let failed = |run| vec![Notice::CalibrationFailed { run, problem: CalibrationProblem::DisplayChanged }];
+        let failed =
+            |run| vec![Notice::CalibrationFailed { run, routine: Routine::Calibration, problem: CalibrationProblem::DisplayChanged }];
 
         // While a run waits for the camera, only its own number cancels it.
         worker.obey(start(1, area));
@@ -775,7 +789,8 @@ mod tests {
         // A check without a calibration to check ends at once, saying so, and leaves no run behind.
         worker.obey(Command::StartCalibration { run: 20, area, routine: Routine::Check });
         worker.begin_waiting_run((1280, 720), 0.5);
-        assert_eq!(notices(), [Notice::CalibrationFailed { run: 20, problem: CalibrationProblem::NotCalibrated }]);
+        let problem = CalibrationProblem::NotCalibrated;
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 20, routine: Routine::Check, problem }]);
         assert_eq!((worker.run, worker.engine.is_calibrating()), (None, false));
 
         worker.obey(start(2, area));
@@ -827,9 +842,45 @@ mod tests {
         let ended = quiet(Mode::Pointing(Activity::Tracking), Some(Err(Failure::FaceLost)));
         worker.report(&ended, None, false);
         let problem = CalibrationProblem::Routine(Failure::FaceLost);
-        assert_eq!(notices(), [Notice::CalibrationFailed { run: 7, problem }]);
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 7, routine: Routine::Calibration, problem }]);
         assert_eq!(seen(), (Status::Pointing(Activity::Tracking), None));
         assert_eq!(worker.run, None);
+    }
+
+    #[test]
+    fn a_head_calibration_run_ends_with_its_speeds_in_the_settings_file_or_says_what_it_was() {
+        let (scratch, setup) = setup("head");
+        let shared = Shared::new(|| {});
+        let (_commands, inbox) = channel();
+        let mut worker = Worker::new(&shared, inbox, setup);
+        let area = RectI::new(0, 0, 2560, 1080);
+        let notices = || std::mem::take(&mut shared.board().notices);
+        let quiet = |finished| Output { trace: None, pointer: None, sound: None, mode: Mode::Pointing(Activity::Tracking), finished };
+
+        worker.obey(Command::StartCalibration { run: 1, area, routine: Routine::Head });
+        worker.begin_waiting_run((1280, 720), 0.0);
+        assert!(worker.engine.is_calibrating() && worker.run == Some(1));
+        let gain = HeadGain { slow: 1270.0, fast: 3810.0, steadiness: 3.0 };
+        worker.report(&quiet(Some(Ok(Outcome::Head(gain)))), None, false);
+        assert_eq!(notices(), [Notice::HeadCalibrated { run: 1, gain, saved: Ok(()) }]);
+        let (settings, warnings) = worker.storage.load_settings();
+        assert_eq!((settings.tuning.head_gain, warnings), (gain, Vec::<String>::new()), "the next start points with it");
+
+        // A head run that fails, or that the display ends, says it was the head's.
+        worker.obey(Command::StartCalibration { run: 2, area, routine: Routine::Head });
+        worker.begin_waiting_run((1280, 720), 1.0);
+        worker.report(&quiet(Some(Err(Failure::HeadNotMoved))), None, false);
+        let problem = CalibrationProblem::Routine(Failure::HeadNotMoved);
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 2, routine: Routine::Head, problem }]);
+        worker.obey(Command::StartCalibration { run: 3, area, routine: Routine::Head });
+        worker.obey(Command::DisplayChanged);
+        let problem = CalibrationProblem::DisplayChanged;
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 3, routine: Routine::Head, problem: problem.clone() }], "while it waits");
+        worker.obey(Command::StartCalibration { run: 4, area, routine: Routine::Head });
+        worker.begin_waiting_run((1280, 720), 2.0);
+        worker.obey(Command::DisplayChanged);
+        assert_eq!(notices(), [Notice::CalibrationFailed { run: 4, routine: Routine::Head, problem }], "under way");
+        drop(scratch);
     }
 
     #[test]
@@ -890,7 +941,8 @@ mod tests {
         assert!(
             matches!(
                 notices.as_slice(),
-                [Notice::CalibrationFailed { run: failed, problem: CalibrationProblem::Camera(_) }] if *failed == run
+                [Notice::CalibrationFailed { run: failed, routine: Routine::Calibration, problem: CalibrationProblem::Camera(_) }]
+                    if *failed == run
             ),
             "{notices:?}"
         );

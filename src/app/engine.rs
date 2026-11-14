@@ -1,9 +1,9 @@
 //! What to do with each camera frame, free of any system call.
 //!
 //! The engine owns what is known about the person (their face shape, their
-//! calibration) and the one thing going on at a time: pointing, or a
-//! calibration run. The pipeline feeds it frames and carries out what it
-//! answers; the engine never moves the pointer itself.
+//! calibration, the tuning) and the one thing going on at a time: pointing, or a
+//! calibration run (of the gaze, its check, or the head). The pipeline feeds it
+//! frames and carries out what it answers; the engine never moves the pointer itself.
 //!
 //! Contract:
 //! - During a calibration run no pointer action and no sound is answered.
@@ -13,9 +13,13 @@
 //!   starts, so a break can never end in a click.
 //! - A calibration run ends exactly once: with `Output::finished` in the frame
 //!   it ends, or with `cancel_calibration` returning true.
+//! - A head calibration that succeeds puts its `HeadGain` into the tuning
+//!   before the frame that reports it returns: the next frame points with it.
 
 use crate::control::calibration::{Calibration, CalibrationSession, Failure, Step, View};
 use crate::control::controller::{Activity, Controller, Frame, Makeup, PointingMode, Sound, Tuning};
+use crate::control::head_calibration::{HeadCalibration, HeadStep};
+use crate::control::head_pointer::HeadGain;
 use crate::geometry::RectI;
 use crate::vision::landmarks::FaceMesh;
 use crate::vision::pose::{ReferenceBuilder, ReferenceShape};
@@ -60,6 +64,15 @@ pub struct Trace {
     pub makeup: Makeup,
 }
 
+/// What a calibration run that succeeded leaves behind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Outcome {
+    /// A calibration of the gaze, made or checked: its typical error in pixels.
+    Gaze { error_px: f32 },
+    /// The head pointer's speeds and steadiness for this person, in use from the next frame.
+    Head(HeadGain),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Output {
     /// Set in a frame of pointing in which a face was measured. Nothing acts on it.
@@ -67,8 +80,14 @@ pub struct Output {
     pub pointer: Option<PointerAction>,
     pub sound: Option<Sound>,
     pub mode: Mode,
-    /// Set in the frame a calibration run ends: the new calibration's typical error in pixels, or why it failed.
-    pub finished: Option<Result<f32, Failure>>,
+    /// Set in the frame a calibration run ends: what it leaves behind, or why it failed.
+    pub finished: Option<Result<Outcome, Failure>>,
+}
+
+/// The run going on, if any.
+enum Session {
+    Gaze(CalibrationSession),
+    Head(HeadCalibration),
 }
 
 /// Why a calibration cannot be used for gaze right now. The face shape in it stays good.
@@ -97,7 +116,7 @@ pub struct Engine {
     learned: Option<ReferenceShape>,
     builder: ReferenceBuilder,
     controller: Controller,
-    session: Option<CalibrationSession>,
+    session: Option<Session>,
     last_frame: f64,
 }
 
@@ -118,13 +137,19 @@ impl Engine {
         self.calibration.as_ref()
     }
 
-    /// Whether anything reads the gaze estimate: jumps in head mode, or the eyes carrying the cursor.
+    /// Whether anything reads the gaze estimate: the eyes carry the cursor in eye and hybrid mode, never in head mode.
     pub fn uses_gaze(&self) -> bool {
-        self.tuning.gaze_jump || self.tuning.pointing != PointingMode::Head
+        self.tuning.pointing != PointingMode::Head
     }
 
     pub fn pointing(&self) -> PointingMode {
         self.tuning.pointing
+    }
+
+    /// For tests: what the program itself needs to know it reads from `Output::finished`.
+    #[cfg(test)]
+    pub fn head_gain(&self) -> HeadGain {
+        self.tuning.head_gain
     }
 
     /// Changes what moves the cursor. Pointing starts afresh, as after any break.
@@ -145,7 +170,13 @@ impl Engine {
     pub fn start_calibration(&mut self, area: RectI, frame_size: (u32, u32), time: f64) {
         // Pointing resumes afresh whichever way the run ends.
         self.interrupt();
-        self.session = Some(CalibrationSession::new(area, frame_size, time));
+        self.session = Some(Session::Gaze(CalibrationSession::new(area, frame_size, time)));
+    }
+
+    /// Starts a head calibration on the screen `area`; a run already under way is abandoned.
+    pub fn start_head_calibration(&mut self, area: RectI, time: f64) {
+        self.interrupt();
+        self.session = Some(Session::Head(HeadCalibration::new(area, time)));
     }
 
     /// Starts a check of the calibration there is, which adds to it. The calibration must be
@@ -158,7 +189,7 @@ impl Engine {
         };
         self.interrupt();
         // The calibration stays in use as it is until the check hands back the one that learned from it.
-        self.session = Some(CalibrationSession::check(calibration, time));
+        self.session = Some(Session::Gaze(CalibrationSession::check(calibration, time)));
         true
     }
 
@@ -183,20 +214,39 @@ impl Engine {
         }
     }
 
-    fn calibrate(&mut self, session: CalibrationSession, input: &Input) -> Output {
+    fn calibrate(&mut self, session: Session, input: &Input) -> Output {
         let quiet = |mode, finished| Output { trace: None, pointer: None, sound: None, mode, finished };
-        match session.step(input.time, input.mesh) {
-            Step::Running(session) => {
-                let view = session.view(input.time);
-                self.session = Some(session);
-                quiet(Mode::Calibrating(view), None)
+        let ended = |outcome| quiet(Mode::Pointing(Activity::default()), Some(outcome));
+        match session {
+            Session::Gaze(session) => match session.step(input.time, input.mesh) {
+                Step::Running(session) => {
+                    let view = session.view(input.time);
+                    self.session = Some(Session::Gaze(session));
+                    quiet(Mode::Calibrating(view), None)
+                }
+                Step::Done(calibration) => {
+                    let error_px = calibration.error_px;
+                    self.calibration = Some(calibration);
+                    ended(Ok(Outcome::Gaze { error_px }))
+                }
+                Step::Failed(failure) => ended(Err(failure)),
+            },
+            Session::Head(session) => {
+                // Measured against the person's face shape, as in pointing.
+                let face = input.mesh.and_then(|mesh| self.measure(mesh));
+                match session.step(input.time, face.as_ref().map(|face| &face.pose)) {
+                    HeadStep::Running(session) => {
+                        let view = session.view(input.time);
+                        self.session = Some(Session::Head(session));
+                        quiet(Mode::Calibrating(view), None)
+                    }
+                    HeadStep::Done(gain) => {
+                        self.tuning.head_gain = gain;
+                        ended(Ok(Outcome::Head(gain)))
+                    }
+                    HeadStep::Failed(failure) => ended(Err(failure)),
+                }
             }
-            Step::Done(calibration) => {
-                let error = calibration.error_px;
-                self.calibration = Some(calibration);
-                quiet(Mode::Pointing(Activity::default()), Some(Ok(error)))
-            }
-            Step::Failed(failure) => quiet(Mode::Pointing(Activity::default()), Some(Err(failure))),
         }
     }
 
@@ -299,6 +349,13 @@ mod tests {
             }
         }
 
+        /// Looks at `gaze` with the eyes alone; the head stays facing the camera.
+        fn eyes_at(&mut self, seconds: f64, gaze: Vec2) {
+            for _ in 0..(seconds * 30.0).round() as u32 {
+                self.frame(Some((&Posture::default(), gaze, 1.0)));
+            }
+        }
+
         /// Goes through a calibration run as an attentive person would. Returns how it ended.
         fn calibrate(&mut self) -> Result<f32, Failure> {
             self.engine.start_calibration(SCREEN, FRAME_SIZE, self.time);
@@ -307,6 +364,13 @@ mod tests {
 
         /// Goes through the run the engine has started as an attentive person would.
         fn through_the_run(&mut self) -> Result<f32, Failure> {
+            self.through_the_run_to_its_end().map(|outcome| match outcome {
+                Outcome::Gaze { error_px } => error_px,
+                Outcome::Head(gain) => panic!("a gaze run ended with {gain:?}"),
+            })
+        }
+
+        fn through_the_run_to_its_end(&mut self) -> Result<Outcome, Failure> {
             let mut gaze = MIDDLE;
             let mut sweep = false;
             loop {
@@ -379,16 +443,18 @@ mod tests {
             assert!(after.training.lessons.len() > before.training.lessons.len() + (round - 1) * 200);
         }
         let far = Vec2::new(2200.0, 300.0);
-        desk.gaze_at(1.0, far, 1.0);
+        desk.engine.set_pointing(PointingMode::Eye);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) < 200.0, "pointing goes on with the new calibration: {:?}", desk.cursor);
     }
 
     #[test]
     fn a_calibration_run_leaves_the_pointer_alone_and_then_lets_the_gaze_move_it() {
         let mut desk = Desk::new(None);
+        desk.engine.set_pointing(PointingMode::Eye);
         desk.gaze_at(1.0, MIDDLE, 1.0);
         let far = Vec2::new(2200.0, 300.0);
-        desk.gaze_at(0.6, far, 1.0);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) > 600.0, "without a calibration the gaze moves nothing: {:?}", desk.cursor);
 
         let error = desk.calibrate().expect("an attentive person calibrates");
@@ -396,7 +462,7 @@ mod tests {
         assert_eq!(desk.engine.calibration().map(|c| (c.area, c.error_px)), Some((SCREEN, error)));
 
         desk.gaze_at(0.5, MIDDLE, 1.0);
-        desk.gaze_at(0.6, far, 1.0);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) < 200.0, "the cursor went to {:?}", desk.cursor);
         assert!(desk.clicks.is_empty());
     }
@@ -404,21 +470,24 @@ mod tests {
     #[test]
     fn switching_to_eye_pointing_takes_effect_on_the_next_frames_and_back_again() {
         let mut desk = Desk::new(Some(calibrated()));
-        let near = Vec2::new(1450.0, 640.0);
-        desk.gaze_at(1.0, MIDDLE, 1.0);
-        desk.gaze_at(1.0, near, 1.0);
-        assert!(desk.distance_to(near) > 120.0, "in head mode a look this near moves nothing: {:?}", desk.cursor);
-        assert!(desk.engine.uses_gaze(), "the jump reads the gaze");
+        let (near, far) = (Vec2::new(1450.0, 640.0), Vec2::new(2200.0, 300.0));
+        desk.eyes_at(1.0, MIDDLE);
+        desk.eyes_at(1.0, near);
+        desk.eyes_at(1.0, far);
+        assert!(desk.distance_to(MIDDLE) < 40.0, "in head mode no look, near or far, moves the cursor: {:?}", desk.cursor);
+        assert!(!desk.engine.uses_gaze(), "head mode reads no gaze");
 
         desk.engine.set_pointing(PointingMode::Eye);
-        desk.gaze_at(2.0, near, 1.0);
+        assert!(desk.engine.uses_gaze());
+        desk.eyes_at(2.0, near);
         assert!(desk.distance_to(near) < 120.0, "in eye mode the cursor is where the person looks: {:?}", desk.cursor);
 
         desk.engine.set_pointing(PointingMode::Head);
         let held = desk.cursor;
-        desk.gaze_at(1.0, MIDDLE, 1.0);
+        desk.eyes_at(1.0, MIDDLE);
+        desk.eyes_at(1.0, far);
         let moved = Vec2::new(desk.cursor.0 as f32, desk.cursor.1 as f32).distance(Vec2::new(held.0 as f32, held.1 as f32));
-        assert!(moved < 60.0, "back in head mode a near look moves next to nothing: {held:?} to {:?}", desk.cursor);
+        assert!(moved < 40.0, "back in head mode the eyes move nothing: {held:?} to {:?}", desk.cursor);
         assert!(desk.clicks.is_empty());
     }
 
@@ -474,16 +543,93 @@ mod tests {
 
         let far = Vec2::new(1700.0, 300.0);
         let mut same = Desk::new(Some(calibration.clone()));
+        same.engine.set_pointing(PointingMode::Eye);
         same.gaze_at(1.0, MIDDLE, 1.0);
-        same.gaze_at(0.6, far, 1.0);
+        same.gaze_at(1.5, far, 1.0);
         assert!(same.distance_to(far) < 200.0, "on the calibrated screen the gaze moves the cursor: {:?}", same.cursor);
 
         let mut changed = Desk::new(Some(calibration));
+        changed.engine.set_pointing(PointingMode::Eye);
         changed.screens = vec![other];
         changed.cursor = (960, 540);
         changed.gaze_at(1.0, MIDDLE, 1.0);
-        changed.gaze_at(0.6, far, 1.0);
+        changed.gaze_at(1.5, far, 1.0);
         assert!(changed.distance_to(Vec2::new(960.0, 540.0)) < 120.0, "the cursor went to {:?}", changed.cursor);
+    }
+
+    /// Goes through a head calibration as a person would who turns this far (yaw, pitch in
+    /// radians) with ease, at a radian a second. Returns how it ended.
+    fn head_calibration(desk: &mut Desk, comfortable: (f32, f32)) -> Result<Outcome, Failure> {
+        desk.engine.start_head_calibration(SCREEN, desk.time);
+        let mut facing = (0.0f32, 0.0f32);
+        let mut goal = (0.0, 0.0);
+        loop {
+            assert!(desk.time < 120.0, "the run must end");
+            let step = 1.0 / 30.0;
+            let toward = |now: f32, to: f32| now + (to - now).clamp(-step, step);
+            facing = (toward(facing.0, goal.0), toward(facing.1, goal.1));
+            let posture = Posture { yaw: facing.0, pitch: facing.1, ..Posture::default() };
+            let output = desk.frame(Some((&posture, MIDDLE, 1.0)));
+            assert_eq!((output.pointer, output.sound), (None, None), "the pointer is left alone during the run");
+            match (output.mode, output.finished) {
+                (Mode::Calibrating(view), None) => {
+                    // Positive yaw turns the nose toward the person's left; positive pitch nods down.
+                    goal = match view.phase {
+                        Phase::HeadLeft => (comfortable.0, 0.0),
+                        Phase::HeadRight => (-comfortable.0, 0.0),
+                        Phase::HeadUp => (0.0, -comfortable.1),
+                        Phase::HeadDown => (0.0, comfortable.1),
+                        _ => (0.0, 0.0),
+                    };
+                }
+                (Mode::Pointing(_), Some(outcome)) => return outcome,
+                other => panic!("a frame of a run either continues it or ends it, not {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_head_calibration_puts_its_speeds_to_use_at_once_and_leaves_the_gaze_alone() {
+        let mut desk = Desk::new(Some(calibrated()));
+        desk.eyes_at(1.0, MIDDLE);
+        let before = desk.engine.calibration().cloned();
+        let Ok(Outcome::Head(gain)) = head_calibration(&mut desk, (0.35, 0.25)) else { panic!("the run failed") };
+        assert_eq!(desk.engine.head_gain(), gain, "in use from the next frame");
+        assert_eq!(desk.engine.calibration().cloned(), before, "the gaze calibration is not touched");
+        assert!(gain.fast > Tuning::default().head_gain.fast && gain.slow <= gain.fast, "{gain:?}");
+        assert!((0.5..=8.0).contains(&gain.steadiness), "{gain:?}");
+
+        // A turn moves the cursor by what the new speeds say: farther than the defaults would.
+        let turn = |desk: &mut Desk| {
+            desk.cursor = (1280, 540);
+            desk.eyes_at(1.0, MIDDLE);
+            for step in 1..=15 {
+                let posture = Posture { yaw: 0.1 * step as f32 / 15.0, ..Posture::default() };
+                desk.frame(Some((&posture, MIDDLE, 1.0)));
+            }
+            desk.eyes_at(1.0, MIDDLE);
+            (desk.cursor.0 - 1280).abs()
+        };
+        let fitted = turn(&mut desk);
+        let mut plain = Desk::new(Some(calibrated()));
+        let usual = turn(&mut plain);
+        assert!(fitted as f32 > usual as f32 * 1.3, "{fitted} px with {gain:?} against {usual} px with the defaults");
+        assert!(desk.clicks.is_empty());
+    }
+
+    #[test]
+    fn a_head_calibration_that_fails_or_is_cancelled_keeps_the_speeds_there_were() {
+        let mut desk = Desk::new(None);
+        desk.eyes_at(1.0, MIDDLE);
+        let usual = desk.engine.head_gain();
+        // Nobody turns: the first turn waits until the stage gives up.
+        assert_eq!(head_calibration(&mut desk, (0.0, 0.0)), Err(Failure::HeadNotMoved));
+        assert_eq!(desk.engine.head_gain(), usual);
+        desk.engine.start_head_calibration(SCREEN, desk.time);
+        let during = desk.frame(Some((&Posture::default(), MIDDLE, 1.0)));
+        assert!(matches!(during.mode, Mode::Calibrating(view) if view.phase == Phase::HeadRest), "{during:?}");
+        assert!(desk.engine.cancel_calibration() && !desk.engine.is_calibrating());
+        assert_eq!(desk.engine.head_gain(), usual);
     }
 
     #[test]

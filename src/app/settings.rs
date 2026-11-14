@@ -6,6 +6,7 @@
 //! shown to the person, so they are written in Japanese like the file itself.
 
 use crate::control::controller::{PointingMode, Tuning};
+use crate::control::head_pointer::HeadGain;
 
 /// The highest camera index accepted (a position in `--list-cameras`).
 const MAX_CAMERA: usize = 31;
@@ -13,6 +14,10 @@ const MAX_CAMERA: usize = 31;
 const LIMIT_MARGIN: f32 = 0.3;
 /// An eye counts as open again this far above the "shut" share of its open size.
 const OPEN_MARGIN: f32 = 0.1;
+/// Settings an older version wrote into the file and this one no longer has.
+/// Their lines are passed over without a warning, since the person did nothing wrong.
+/// `gaze_jump` switched the jump to where the person looked in head mode, which is head-only now.
+const RETIRED: [&str; 1] = ["gaze_jump"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -41,11 +46,12 @@ fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
         "calibration_record" => Slot::Switch(&mut settings.record_calibration),
         "pointing_record" => Slot::Switch(&mut settings.record_pointing),
         "pointing" => Slot::Pointing(&mut tuning.pointing),
-        "gaze_jump" => Slot::Switch(&mut tuning.gaze_jump),
         "blink_click" => Slot::Switch(&mut tuning.blink_click),
-        "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, 50.0, 5000.0),
-        "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
-        "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
+        "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, HeadGain::SLOW.0, HeadGain::SLOW.1),
+        "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, HeadGain::FAST.0, HeadGain::FAST.1),
+        "head_steadiness" => {
+            Slot::Number(&mut tuning.head_gain.steadiness, HeadGain::STEADINESS.0, HeadGain::STEADINESS.1)
+        }
         "eye_steadiness" => Slot::Number(&mut tuning.eye_steadiness, 0.5, 8.0),
         "hybrid_head_speed" => Slot::Number(&mut tuning.hybrid_speed, 20.0, 5000.0),
         "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
@@ -80,6 +86,9 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             continue;
         };
         let (name, value) = (name.trim(), value.trim());
+        if RETIRED.contains(&name) {
+            continue;
+        }
         match slot(&mut settings, name) {
             None => warnings.push(format!("{place}: 「{name}」という設定はありません")),
             Some(Slot::Switch(target)) => match switch(value) {
@@ -136,11 +145,23 @@ pub fn pointing_word(mode: PointingMode) -> &'static str {
     }
 }
 
-/// The settings file's `text` with the pointing mode set to `mode`. Every line
+/// The settings file's `text` with the pointing mode set to `mode`, as `with_setting` does it.
+pub fn with_pointing(text: &str, mode: PointingMode) -> String {
+    with_setting(text, "pointing", pointing_word(mode))
+}
+
+/// The settings file's `text` with the head pointer's speeds and steadiness set to `gain`,
+/// as `with_setting` does it. The speeds are written as whole pixels.
+pub fn with_head_gain(text: &str, gain: &HeadGain) -> String {
+    let text = with_setting(text, "head_speed_slow", &format!("{:.0}", gain.slow));
+    let text = with_setting(&text, "head_speed_fast", &format!("{:.0}", gain.fast));
+    with_setting(&text, "head_steadiness", &gain.steadiness.to_string())
+}
+
+/// The settings file's `text` with the setting `name` set to `word`. Every line
 /// that sets it gets the new value and keeps its comment; a text without such
 /// a line gets one at the end. Nothing else in the text changes.
-pub fn with_pointing(text: &str, mode: PointingMode) -> String {
-    let word = pointing_word(mode);
+fn with_setting(text: &str, name: &str, word: &str) -> String {
     let mut changed = String::with_capacity(text.len() + 32);
     let mut found = false;
     // A byte-order mark in front of the first line is not part of it, as in `parse`.
@@ -150,10 +171,10 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
         let body = raw.trim_end_matches(['\r', '\n']);
         let (setting, comment) = body.split_at(body.find('#').unwrap_or(body.len()));
         let name_at = setting.len() - setting.trim_start().len();
-        if setting[name_at..].split_once('=').is_some_and(|(name, _)| name.trim() == "pointing") {
+        if setting[name_at..].split_once('=').is_some_and(|(written, _)| written.trim() == name) {
             found = true;
             let gap = if comment.is_empty() { "" } else { " " };
-            changed.push_str(&format!("{}pointing = {word}{gap}{comment}{}", &setting[..name_at], &raw[body.len()..]));
+            changed.push_str(&format!("{}{name} = {word}{gap}{comment}{}", &setting[..name_at], &raw[body.len()..]));
         } else {
             changed.push_str(raw);
         }
@@ -163,7 +184,7 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
         if !changed.is_empty() && !changed.ends_with('\n') {
             changed.push_str(ending);
         }
-        changed.push_str(&format!("pointing = {word}{ending}"));
+        changed.push_str(&format!("{name} = {word}{ending}"));
     }
     changed
 }
@@ -182,16 +203,12 @@ pub fn template() -> String {
 camera = {camera}
 
 # カーソルを動かすもの: head / eye / hybrid
-# head: 頭の動きで動かし、遠くを見ると視線ジャンプで飛ぶ（既定）
+# head: 頭の動きだけで動かす。視線は使いません（既定）。
 # eye: 視線がそのままカーソルの位置になる、連続追従の eye tracking。
 # hybrid: 視線がカーソルを運び、頭の小さな動きでそこから微調整する。
 #         別の場所（jump_distance 以上離れた所）を見ると微調整は消えます。
 # eye と hybrid はキャリブレーション済みの画面でのみ動き、未実施なら頭の動きだけで動かします。
 pointing = {pointing}
-
-# 視線ジャンプ（見た場所へカーソルが飛ぶ）: on / off
-# pointing = head のときだけ使います（eye と hybrid では視線が常にカーソルを運ぶため）。
-gaze_jump = {gaze_jump}
 
 # 長いまばたきで左クリック: on / off
 blink_click = {blink_click}
@@ -212,9 +229,8 @@ eye_steadiness = {eye_steadiness}
 # 微調整用なので head_speed_slow より小さくし、すばやく動かしても速くなりません。
 hybrid_head_speed = {hybrid_speed}
 
-# 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
-# これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
-# hybrid では、視線がこの距離だけカーソルを運ぶと頭での微調整が消えます。
+# pointing = hybrid のとき、頭での微調整が消える距離（ピクセル、120〜5000）
+# 視線がカーソルをこの距離だけ運ぶと、別の場所を見たとみなして微調整を消します。
 jump_distance = {jump}
 
 # クリックになるまで目を閉じておく時間（秒、0.15〜3.0）
@@ -236,7 +252,6 @@ calibration_record = {record}
 pointing_record = {pointing_record}
 ",
         pointing = pointing_word(tuning.pointing),
-        gaze_jump = on_off(tuning.gaze_jump),
         blink_click = on_off(tuning.blink_click),
         slow = tuning.head_gain.slow,
         fast = tuning.head_gain.fast,
@@ -262,22 +277,35 @@ mod tests {
         assert_eq!(settings, Settings::default());
         assert_eq!(warnings, Vec::<String>::new());
         // Every setting is offered in the template.
-        let names = ["camera", "calibration_record", "pointing_record", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "hybrid_head_speed", "jump_distance"];
-        for name in names.into_iter().chain(["blink_hold", "blink_limit", "blink_closed"]) {
+        let names = ["camera", "calibration_record", "pointing_record", "pointing", "blink_click", "head_speed_slow", "head_speed_fast", "head_steadiness", "eye_steadiness", "hybrid_head_speed"];
+        for name in names.into_iter().chain(["jump_distance", "blink_hold", "blink_limit", "blink_closed"]) {
             assert!(slot(&mut Settings::default(), name).is_some(), "{name}");
             assert!(template().contains(&format!("\n{name} = ")), "{name}");
+        }
+        for name in RETIRED {
+            assert!(slot(&mut Settings::default(), name).is_none() && !template().contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_setting_an_older_version_wrote_is_passed_over_without_a_warning() {
+        // A file written by v0.2.0 still says `gaze_jump = on`; the person did nothing wrong.
+        for text in ["gaze_jump = on\nblink_click = off\n", "  gaze_jump=OFF # old\nblink_click = off\n", "gaze_jump = maybe\nblink_click = off\n"] {
+            let (settings, warnings) = parse(text);
+            assert_eq!(warnings, Vec::<String>::new(), "{text}");
+            assert!(!settings.tuning.blink_click, "the lines after it still count: {text}");
         }
     }
 
     #[test]
     fn values_are_read_past_comments_spacing_and_a_byte_order_mark() {
-        let text = "\u{feff}camera=2 # the second camera\r\n\r\n  gaze_jump = OFF\nblink_click = no\nhead_speed_slow = 400\n\
+        let text = "\u{feff}camera=2 # the second camera\r\n\r\n  blink_click = no\nhead_speed_slow = 400\n\
                     head_speed_fast=1500.5\njump_distance = 300\nblink_hold = 0.6\nblink_limit = 2\nblink_closed = 0.4\n";
         let (settings, warnings) = parse(text);
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(settings.camera, 2);
         let tuning = settings.tuning;
-        assert!(!tuning.gaze_jump && !tuning.blink_click);
+        assert!(!tuning.blink_click);
         assert_eq!((tuning.head_gain.slow, tuning.head_gain.fast), (400.0, 1500.5));
         assert_eq!(tuning.jump_distance, 300.0);
         assert_eq!((tuning.blink.hold, tuning.blink.limit, tuning.blink.closed_ratio), (0.6, 2.0, 0.4));
@@ -337,6 +365,31 @@ mod tests {
     }
 
     #[test]
+    fn the_head_speeds_a_calibration_fits_replace_their_lines_and_read_back() {
+        let gain = HeadGain { slow: 1_272.894_7, fast: 3_818.683_8, steadiness: 1.5 };
+        let template = template();
+        let fitted = with_head_gain(&template, &gain);
+        let expected = template
+            .replace("\nhead_speed_slow = 700\n", "\nhead_speed_slow = 1273\n")
+            .replace("\nhead_speed_fast = 2200\n", "\nhead_speed_fast = 3819\n")
+            .replace("\nhead_steadiness = 2\n", "\nhead_steadiness = 1.5\n");
+        assert_ne!(expected, template, "the template has the three lines");
+        assert_eq!(fitted, expected, "the three lines change and nothing else");
+        let (settings, warnings) = parse(&fitted);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(settings.tuning.head_gain, HeadGain { slow: 1273.0, fast: 3819.0, steadiness: 1.5 });
+
+        // A person's own file keeps its comments and its other lines; missing lines go at the end.
+        let own = "camera = 1\r\nhead_speed_fast=900 # mine\r\n";
+        assert_eq!(
+            with_head_gain(own, &gain),
+            "camera = 1\r\nhead_speed_fast = 3819 # mine\r\nhead_speed_slow = 1273\r\nhead_steadiness = 1.5\r\n"
+        );
+        // A setting whose name only begins like another is not that setting.
+        assert_eq!(with_setting("head_speed = 5\n", "head_speed_slow", "9"), "head_speed = 5\nhead_speed_slow = 9\n");
+    }
+
+    #[test]
     fn an_empty_file_means_the_defaults() {
         assert_eq!(parse(""), (Settings::default(), Vec::new()));
         assert_eq!(parse("# nothing but a comment\n\n"), (Settings::default(), Vec::new()));
@@ -348,7 +401,7 @@ mod tests {
         for (text, mentions) in [
             ("head_speed_slow = fast", "head_speed_slow"),
             ("head_speed_slow = NaN", "head_speed_slow"),
-            ("gaze_jump = maybe", "gaze_jump"),
+            ("blink_click = maybe", "blink_click"),
             ("camera = -1", "camera"),
             ("camera = 1.5", "camera"),
             ("mouse_speed = 3", "mouse_speed"),
@@ -359,7 +412,7 @@ mod tests {
             assert!(warnings[0].starts_with("2行目") && warnings[0].contains(mentions), "{}", warnings[0]);
             assert_eq!(settings.camera, defaults.camera, "{text}");
             assert_eq!(settings.tuning.head_gain, defaults.tuning.head_gain, "{text}");
-            assert_eq!(settings.tuning.gaze_jump, defaults.tuning.gaze_jump, "{text}");
+            assert_eq!(settings.tuning.blink_click, defaults.tuning.blink_click, "{text}");
             assert_eq!(settings.tuning.blink.hold, 0.5, "the usable line still counts");
         }
     }
