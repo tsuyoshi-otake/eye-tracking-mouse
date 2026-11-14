@@ -30,7 +30,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::control::calibration::{Failure, View};
-use crate::control::controller::{Activity, Sound, Tuning};
+use crate::control::controller::{Activity, PointingMode, Sound, Tuning};
 use crate::error::{Context, Error, Result};
 use crate::geometry::RectI;
 use crate::image::BgraFrame;
@@ -360,7 +360,8 @@ struct Worker<'a> {
     shared: &'a Shared,
     inbox: Receiver<Command>,
     request: CameraRequest,
-    gaze_jump: bool,
+    /// Whether anything reads the gaze estimate: jumps in head mode, or eye pointing.
+    gaze_used: bool,
     storage: Storage,
     engine: Engine,
     desktop: Option<Desktop>,
@@ -393,7 +394,7 @@ impl<'a> Worker<'a> {
             shared,
             inbox,
             request: setup.camera,
-            gaze_jump: setup.tuning.gaze_jump,
+            gaze_used: setup.tuning.gaze_jump || setup.tuning.pointing == PointingMode::Eye,
             storage: setup.storage,
             engine: Engine::new(setup.tuning, calibration),
             desktop: Desktop::query().ok(),
@@ -583,7 +584,7 @@ impl<'a> Worker<'a> {
             screens,
         });
         let problem =
-            self.engine.calibration().filter(|_| self.gaze_jump).and_then(|c| gaze_problem(c, frame_size, screens));
+            self.engine.calibration().filter(|_| self.gaze_used).and_then(|c| gaze_problem(c, frame_size, screens));
         let refused = self.act(&output);
         self.report(&output, problem, refused);
     }
