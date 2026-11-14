@@ -96,7 +96,7 @@ pub enum Notice {
     CalibrationDone { run: u32, routine: Routine, error_px: f32, saved: std::result::Result<(), String> },
     /// Calibration run `run` ended without a result.
     CalibrationFailed { run: u32, problem: CalibrationProblem },
-    /// The calibration cannot be used for gaze jumps as things are; pointing with the head goes on.
+    /// The calibration cannot be used for pointing with the eyes as things are; pointing with the head goes on.
     GazeUnavailable(GazeProblem),
     /// The saved calibration could not be read; the text says why.
     CalibrationUnreadable(String),

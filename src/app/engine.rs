@@ -118,9 +118,9 @@ impl Engine {
         self.calibration.as_ref()
     }
 
-    /// Whether anything reads the gaze estimate: jumps in head mode, or the eyes carrying the cursor.
+    /// Whether anything reads the gaze estimate: the eyes carry the cursor in eye and hybrid mode, never in head mode.
     pub fn uses_gaze(&self) -> bool {
-        self.tuning.gaze_jump || self.tuning.pointing != PointingMode::Head
+        self.tuning.pointing != PointingMode::Head
     }
 
     pub fn pointing(&self) -> PointingMode {
@@ -299,6 +299,13 @@ mod tests {
             }
         }
 
+        /// Looks at `gaze` with the eyes alone; the head stays facing the camera.
+        fn eyes_at(&mut self, seconds: f64, gaze: Vec2) {
+            for _ in 0..(seconds * 30.0).round() as u32 {
+                self.frame(Some((&Posture::default(), gaze, 1.0)));
+            }
+        }
+
         /// Goes through a calibration run as an attentive person would. Returns how it ended.
         fn calibrate(&mut self) -> Result<f32, Failure> {
             self.engine.start_calibration(SCREEN, FRAME_SIZE, self.time);
@@ -379,16 +386,18 @@ mod tests {
             assert!(after.training.lessons.len() > before.training.lessons.len() + (round - 1) * 200);
         }
         let far = Vec2::new(2200.0, 300.0);
-        desk.gaze_at(1.0, far, 1.0);
+        desk.engine.set_pointing(PointingMode::Eye);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) < 200.0, "pointing goes on with the new calibration: {:?}", desk.cursor);
     }
 
     #[test]
     fn a_calibration_run_leaves_the_pointer_alone_and_then_lets_the_gaze_move_it() {
         let mut desk = Desk::new(None);
+        desk.engine.set_pointing(PointingMode::Eye);
         desk.gaze_at(1.0, MIDDLE, 1.0);
         let far = Vec2::new(2200.0, 300.0);
-        desk.gaze_at(0.6, far, 1.0);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) > 600.0, "without a calibration the gaze moves nothing: {:?}", desk.cursor);
 
         let error = desk.calibrate().expect("an attentive person calibrates");
@@ -396,7 +405,7 @@ mod tests {
         assert_eq!(desk.engine.calibration().map(|c| (c.area, c.error_px)), Some((SCREEN, error)));
 
         desk.gaze_at(0.5, MIDDLE, 1.0);
-        desk.gaze_at(0.6, far, 1.0);
+        desk.gaze_at(1.5, far, 1.0);
         assert!(desk.distance_to(far) < 200.0, "the cursor went to {:?}", desk.cursor);
         assert!(desk.clicks.is_empty());
     }
@@ -404,21 +413,24 @@ mod tests {
     #[test]
     fn switching_to_eye_pointing_takes_effect_on_the_next_frames_and_back_again() {
         let mut desk = Desk::new(Some(calibrated()));
-        let near = Vec2::new(1450.0, 640.0);
-        desk.gaze_at(1.0, MIDDLE, 1.0);
-        desk.gaze_at(1.0, near, 1.0);
-        assert!(desk.distance_to(near) > 120.0, "in head mode a look this near moves nothing: {:?}", desk.cursor);
-        assert!(desk.engine.uses_gaze(), "the jump reads the gaze");
+        let (near, far) = (Vec2::new(1450.0, 640.0), Vec2::new(2200.0, 300.0));
+        desk.eyes_at(1.0, MIDDLE);
+        desk.eyes_at(1.0, near);
+        desk.eyes_at(1.0, far);
+        assert!(desk.distance_to(MIDDLE) < 40.0, "in head mode no look, near or far, moves the cursor: {:?}", desk.cursor);
+        assert!(!desk.engine.uses_gaze(), "head mode reads no gaze");
 
         desk.engine.set_pointing(PointingMode::Eye);
-        desk.gaze_at(2.0, near, 1.0);
+        assert!(desk.engine.uses_gaze());
+        desk.eyes_at(2.0, near);
         assert!(desk.distance_to(near) < 120.0, "in eye mode the cursor is where the person looks: {:?}", desk.cursor);
 
         desk.engine.set_pointing(PointingMode::Head);
         let held = desk.cursor;
-        desk.gaze_at(1.0, MIDDLE, 1.0);
+        desk.eyes_at(1.0, MIDDLE);
+        desk.eyes_at(1.0, far);
         let moved = Vec2::new(desk.cursor.0 as f32, desk.cursor.1 as f32).distance(Vec2::new(held.0 as f32, held.1 as f32));
-        assert!(moved < 60.0, "back in head mode a near look moves next to nothing: {held:?} to {:?}", desk.cursor);
+        assert!(moved < 40.0, "back in head mode the eyes move nothing: {held:?} to {:?}", desk.cursor);
         assert!(desk.clicks.is_empty());
     }
 
@@ -474,15 +486,17 @@ mod tests {
 
         let far = Vec2::new(1700.0, 300.0);
         let mut same = Desk::new(Some(calibration.clone()));
+        same.engine.set_pointing(PointingMode::Eye);
         same.gaze_at(1.0, MIDDLE, 1.0);
-        same.gaze_at(0.6, far, 1.0);
+        same.gaze_at(1.5, far, 1.0);
         assert!(same.distance_to(far) < 200.0, "on the calibrated screen the gaze moves the cursor: {:?}", same.cursor);
 
         let mut changed = Desk::new(Some(calibration));
+        changed.engine.set_pointing(PointingMode::Eye);
         changed.screens = vec![other];
         changed.cursor = (960, 540);
         changed.gaze_at(1.0, MIDDLE, 1.0);
-        changed.gaze_at(0.6, far, 1.0);
+        changed.gaze_at(1.5, far, 1.0);
         assert!(changed.distance_to(Vec2::new(960.0, 540.0)) < 120.0, "the cursor went to {:?}", changed.cursor);
     }
 

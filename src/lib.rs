@@ -1,4 +1,4 @@
-//! Camera-driven mouse: gaze jump, head fine-tuning, blink click.
+//! Camera-driven mouse: pointing with the head, the eyes or both, and clicking with a long blink.
 //!
 //! Layering (dependencies point downward only):
 //!

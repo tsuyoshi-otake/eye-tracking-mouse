@@ -33,7 +33,7 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 ja.WelcomeLabel1=eye-tracking-mouse のセットアップ
-ja.WelcomeLabel2=カメラでマウスを操作する eye-tracking-mouse をインストールします。%n%n視線でカーソルをジャンプさせ、頭の動きで微調整し、まばたきでクリックします。
+ja.WelcomeLabel2=カメラでマウスを操作する eye-tracking-mouse をインストールします。%n%n頭の動き(または視線)でカーソルを動かし、まばたきでクリックします。
 ja.FinishedHeadingLabel=eye-tracking-mouse の準備ができました
 ja.FinishedLabel=eye-tracking-mouse のインストールが完了しました。スタートメニューから起動できます。起動すると通知領域にアイコンが表示されます。
 ja.FinishedLabelNoIcons=eye-tracking-mouse のインストールが完了しました。

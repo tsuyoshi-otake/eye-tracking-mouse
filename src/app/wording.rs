@@ -37,7 +37,7 @@ pub fn status(status: &Status) -> String {
 
 /// Shown once when the program has started.
 pub fn started(has_calibration: bool) -> Message {
-    let gaze = if has_calibration { "" } else { "\n視線ジャンプを使うには Ctrl+Alt+C でキャリブレーションします。" };
+    let gaze = if has_calibration { "" } else { "\n視線で動かすには Ctrl+Alt+C でキャリブレーションします。" };
     Message {
         title: "eye-tracking-mouse を開始しました",
         text: format!("一時停止 Ctrl+Alt+P / 終了 Ctrl+Alt+Q。マウスを動かすと自動で待機します。{gaze}"),
@@ -62,7 +62,7 @@ pub const MENU_CALIBRATE_STOP_SHORT: &str = "キャリブレーションを中�
 pub const MENU_CHECK_STOP_SHORT: &str = "追加補正テストを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
 /// What moves the cursor; the one in use is checked.
-pub const MENU_POINT_HEAD: &str = "頭で動かす（遠くを見るとジャンプ）";
+pub const MENU_POINT_HEAD: &str = "頭だけで動かす";
 pub const MENU_POINT_EYE: &str = "視線で動かす（eye tracking）";
 pub const MENU_POINT_HYBRID: &str = "視線で動かし、頭で微調整（ハイブリッド）";
 pub const MENU_SETTINGS: &str = "設定ファイルを開く（再起動で反映）";
@@ -186,7 +186,7 @@ pub fn notice(notice: &Notice) -> Message {
                 GazeProblem::CameraChanged => "カメラの解像度がキャリブレーション時と違います。",
             };
             Message {
-                title: "視線ジャンプは休止中です",
+                title: "視線での操作は休止中です",
                 text: format!("{cause}頭での操作とクリックはそのまま使えます。{RETRY}"),
                 warning: true,
             }

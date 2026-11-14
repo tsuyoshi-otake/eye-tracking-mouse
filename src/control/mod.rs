@@ -5,7 +5,6 @@ pub mod calibration;
 pub mod controller;
 pub mod eye_pointer;
 pub mod filter;
-pub mod fixation;
 pub mod gaze;
 pub mod guard;
 pub mod head_pointer;
