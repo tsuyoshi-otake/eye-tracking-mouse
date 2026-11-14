@@ -51,7 +51,7 @@ const SHAKE_REACH: usize = 7;
 const STAGE_LIMIT: f64 = 20.0;
 const FACE_LIMIT: f64 = 5.0;
 /// The share of the comfortable range that a quick turn needs to cross the screen.
-const REACH_SHARE: f32 = 0.7;
+const REACH_SHARE: f32 = 1.0;
 /// The slow speed as a share of the fast one (the defaults, 700 and 2200, are about a third).
 const SLOW_SHARE: f32 = 1.0 / 3.0;
 /// Cursor path per second, in pixels, that the shake may still cause. On one person's
