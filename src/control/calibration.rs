@@ -257,12 +257,21 @@ impl Calibration {
     }
 }
 
+/// The part of a run the page shows: of the gaze calibration, of its check, or of the
+/// head calibration (`head_calibration`), which shares the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Rest,
     Places,
     Sweep,
     Check,
+    /// The head calibration: facing the middle and holding still.
+    HeadRest,
+    /// The head calibration: turning the face toward the dot at that edge and holding it there.
+    HeadLeft,
+    HeadRight,
+    HeadUp,
+    HeadDown,
 }
 
 /// How the check went.

@@ -6,6 +6,7 @@
 //! shown to the person, so they are written in Japanese like the file itself.
 
 use crate::control::controller::{PointingMode, Tuning};
+use crate::control::head_pointer::HeadGain;
 
 /// The highest camera index accepted (a position in `--list-cameras`).
 const MAX_CAMERA: usize = 31;
@@ -46,9 +47,11 @@ fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
         "pointing_record" => Slot::Switch(&mut settings.record_pointing),
         "pointing" => Slot::Pointing(&mut tuning.pointing),
         "blink_click" => Slot::Switch(&mut tuning.blink_click),
-        "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, 50.0, 5000.0),
-        "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
-        "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
+        "head_speed_slow" => Slot::Number(&mut tuning.head_gain.slow, HeadGain::SLOW.0, HeadGain::SLOW.1),
+        "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, HeadGain::FAST.0, HeadGain::FAST.1),
+        "head_steadiness" => {
+            Slot::Number(&mut tuning.head_gain.steadiness, HeadGain::STEADINESS.0, HeadGain::STEADINESS.1)
+        }
         "eye_steadiness" => Slot::Number(&mut tuning.eye_steadiness, 0.5, 8.0),
         "hybrid_head_speed" => Slot::Number(&mut tuning.hybrid_speed, 20.0, 5000.0),
         "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
@@ -142,11 +145,23 @@ pub fn pointing_word(mode: PointingMode) -> &'static str {
     }
 }
 
-/// The settings file's `text` with the pointing mode set to `mode`. Every line
+/// The settings file's `text` with the pointing mode set to `mode`, as `with_setting` does it.
+pub fn with_pointing(text: &str, mode: PointingMode) -> String {
+    with_setting(text, "pointing", pointing_word(mode))
+}
+
+/// The settings file's `text` with the head pointer's speeds and steadiness set to `gain`,
+/// as `with_setting` does it. The speeds are written as whole pixels.
+pub fn with_head_gain(text: &str, gain: &HeadGain) -> String {
+    let text = with_setting(text, "head_speed_slow", &format!("{:.0}", gain.slow));
+    let text = with_setting(&text, "head_speed_fast", &format!("{:.0}", gain.fast));
+    with_setting(&text, "head_steadiness", &gain.steadiness.to_string())
+}
+
+/// The settings file's `text` with the setting `name` set to `word`. Every line
 /// that sets it gets the new value and keeps its comment; a text without such
 /// a line gets one at the end. Nothing else in the text changes.
-pub fn with_pointing(text: &str, mode: PointingMode) -> String {
-    let word = pointing_word(mode);
+fn with_setting(text: &str, name: &str, word: &str) -> String {
     let mut changed = String::with_capacity(text.len() + 32);
     let mut found = false;
     // A byte-order mark in front of the first line is not part of it, as in `parse`.
@@ -156,10 +171,10 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
         let body = raw.trim_end_matches(['\r', '\n']);
         let (setting, comment) = body.split_at(body.find('#').unwrap_or(body.len()));
         let name_at = setting.len() - setting.trim_start().len();
-        if setting[name_at..].split_once('=').is_some_and(|(name, _)| name.trim() == "pointing") {
+        if setting[name_at..].split_once('=').is_some_and(|(written, _)| written.trim() == name) {
             found = true;
             let gap = if comment.is_empty() { "" } else { " " };
-            changed.push_str(&format!("{}pointing = {word}{gap}{comment}{}", &setting[..name_at], &raw[body.len()..]));
+            changed.push_str(&format!("{}{name} = {word}{gap}{comment}{}", &setting[..name_at], &raw[body.len()..]));
         } else {
             changed.push_str(raw);
         }
@@ -169,7 +184,7 @@ pub fn with_pointing(text: &str, mode: PointingMode) -> String {
         if !changed.is_empty() && !changed.ends_with('\n') {
             changed.push_str(ending);
         }
-        changed.push_str(&format!("pointing = {word}{ending}"));
+        changed.push_str(&format!("{name} = {word}{ending}"));
     }
     changed
 }
@@ -347,6 +362,31 @@ mod tests {
                 assert_eq!(warnings.len(), usize::from(unusable), "{text:?}: {warnings:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_head_speeds_a_calibration_fits_replace_their_lines_and_read_back() {
+        let gain = HeadGain { slow: 1_272.894_7, fast: 3_818.683_8, steadiness: 1.5 };
+        let template = template();
+        let fitted = with_head_gain(&template, &gain);
+        let expected = template
+            .replace("\nhead_speed_slow = 700\n", "\nhead_speed_slow = 1273\n")
+            .replace("\nhead_speed_fast = 2200\n", "\nhead_speed_fast = 3819\n")
+            .replace("\nhead_steadiness = 2\n", "\nhead_steadiness = 1.5\n");
+        assert_ne!(expected, template, "the template has the three lines");
+        assert_eq!(fitted, expected, "the three lines change and nothing else");
+        let (settings, warnings) = parse(&fitted);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(settings.tuning.head_gain, HeadGain { slow: 1273.0, fast: 3819.0, steadiness: 1.5 });
+
+        // A person's own file keeps its comments and its other lines; missing lines go at the end.
+        let own = "camera = 1\r\nhead_speed_fast=900 # mine\r\n";
+        assert_eq!(
+            with_head_gain(own, &gain),
+            "camera = 1\r\nhead_speed_fast = 3819 # mine\r\nhead_speed_slow = 1273\r\nhead_steadiness = 1.5\r\n"
+        );
+        // A setting whose name only begins like another is not that setting.
+        assert_eq!(with_setting("head_speed = 5\n", "head_speed_slow", "9"), "head_speed = 5\nhead_speed_slow = 9\n");
     }
 
     #[test]

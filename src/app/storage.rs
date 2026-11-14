@@ -1,8 +1,9 @@
 //! Where the settings, the calibration and the log are kept between runs.
 //!
 //! One folder holds everything: `settings.txt` is written once as a commented
-//! template and from then on belongs to the person, except for the line a
-//! choice in the menu rewrites (`save_pointing`); `calibration.txt` is
+//! template and from then on belongs to the person, except for the lines the
+//! program rewrites: the pointing mode chosen in the menu (`save_pointing`) and
+//! the head speeds a head calibration fits (`save_head_gain`); `calibration.txt` is
 //! replaced after each successful calibration. A file is replaced in one
 //! step, so a crash never leaves half of one.
 
@@ -13,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::control::calibration::Calibration;
 use crate::control::controller::PointingMode;
+use crate::control::head_pointer::HeadGain;
 use crate::error::{Context, Error, Result};
 
 use super::settings::{self, Settings};
@@ -68,13 +70,23 @@ impl Storage {
     /// Records the pointing mode in the settings file; the person's other lines and comments
     /// stay as they are. A file that cannot be read is left alone and the error says so.
     pub fn save_pointing(&self, mode: PointingMode) -> Result<()> {
+        self.rewrite_settings(|text| settings::with_pointing(text, mode))
+    }
+
+    /// Records the head pointer's speeds and steadiness in the settings file, as `save_pointing` does the mode.
+    pub fn save_head_gain(&self, gain: &HeadGain) -> Result<()> {
+        self.rewrite_settings(|text| settings::with_head_gain(text, gain))
+    }
+
+    /// Replaces the settings file with what `change` makes of its text (of the template when there is no file yet).
+    fn rewrite_settings(&self, change: impl FnOnce(&str) -> String) -> Result<()> {
         let path = self.settings_path();
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == ErrorKind::NotFound => settings::template(),
             Err(error) => return Err(Error::from(error)).context("read the settings"),
         };
-        self.replace(SETTINGS_FILE, &settings::with_pointing(&text, mode)).context("write the settings")
+        self.replace(SETTINGS_FILE, &change(&text)).context("write the settings")
     }
 
     /// Puts `text` in the place of the file `name`, in one step.

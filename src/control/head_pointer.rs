@@ -1,6 +1,6 @@
 //! Turns head movement into cursor movement, like a mouse held by the nose.
 //!
-//! The pointing signal is where the nose is aimed: the head's position in the
+//! The pointing signal is where the nose is aimed (`Aim`): the head's position in the
 //! image plus `LEVER` times the direction it faces, in eye spans. It is
 //! smoothed, cleared of resting jitter, and its change since the previous
 //! frame is scaled into pixels. The camera faces the user, so image-right is
@@ -34,14 +34,42 @@ pub struct HeadGain {
     pub steadiness: f32,
 }
 
+impl HeadGain {
+    /// The values each part may take, lowest and highest: what the settings file accepts and
+    /// what the head calibration fits within. `fast` is never below `slow`.
+    pub const SLOW: (f32, f32) = (50.0, 5000.0);
+    pub const FAST: (f32, f32) = (50.0, 20000.0);
+    pub const STEADINESS: (f32, f32) = (0.5, 8.0);
+}
+
+/// The raw pointing signal: where the nose is aimed, in eye spans. It is the head's
+/// travel since the first frame plus `LEVER` times the direction it faces, so turning
+/// and shifting the head both count. The head calibration measures this very signal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Aim {
+    /// Head position of the previous frame, in image pixels.
+    last_position: Option<Vec2>,
+    /// Sideways and vertical head travel since the first frame, in eye spans.
+    travel: Vec2,
+}
+
+impl Aim {
+    /// The signal for this frame's pose.
+    pub fn step(&mut self, pose: &HeadPose) -> Vec2 {
+        if let Some(last) = self.last_position {
+            // Dividing each step by the current scale keeps a lean toward the camera from reading as travel.
+            self.travel = self.travel + (pose.position - last) * (1.0 / pose.scale);
+        }
+        self.last_position = Some(pose.position);
+        self.travel + pose.forward() * LEVER
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HeadPointer {
     smoother: OneEuro2,
     backlash: Backlash,
-    /// Head position of the previous frame, in image pixels.
-    last_position: Option<Vec2>,
-    /// Sideways and vertical head travel since the last reset, in eye spans.
-    travel: Vec2,
+    aim: Aim,
     /// Time and cleaned signal of the previous frame.
     last_signal: Option<(f64, Vec2)>,
 }
@@ -51,8 +79,7 @@ impl Default for HeadPointer {
         HeadPointer {
             smoother: OneEuro2::new(REST_CUTOFF, SPEED_RESPONSE),
             backlash: Backlash::new(SLACK),
-            last_position: None,
-            travel: Vec2::ZERO,
+            aim: Aim::default(),
             last_signal: None,
         }
     }
@@ -66,12 +93,7 @@ impl HeadPointer {
 
     /// The cursor displacement, in pixels, for the head movement since the previous call.
     pub fn step(&mut self, time: f64, pose: &HeadPose, gain: &HeadGain) -> Vec2 {
-        if let Some(last) = self.last_position {
-            // Dividing each step by the current scale keeps a lean toward the camera from reading as travel.
-            self.travel = self.travel + (pose.position - last) * (1.0 / pose.scale);
-        }
-        self.last_position = Some(pose.position);
-        let raw = self.travel + pose.forward() * LEVER;
+        let raw = self.aim.step(pose);
         self.smoother.set_min_cutoff(REST_CUTOFF / gain.steadiness);
         self.backlash.set_slack(SLACK * gain.steadiness);
         let signal = self.backlash.follow(self.smoother.filter(time, raw));
@@ -87,8 +109,14 @@ impl HeadPointer {
         let pace = ((change.length() / dt - SLOW_SPEED) / (FAST_SPEED - SLOW_SPEED)).clamp(0.0, 1.0);
         let blend = pace * pace * (3.0 - 2.0 * pace);
         let pixels_per_span = gain.slow + (gain.fast - gain.slow) * blend;
-        Vec2::new(-change.x * pixels_per_span, change.y * pixels_per_span)
+        toward_screen(change) * pixels_per_span
     }
+}
+
+/// A signal (or a change of it) on the screen's axes: the camera faces the person, so
+/// image-right is the person's left, which is the screen's left.
+pub fn toward_screen(signal: Vec2) -> Vec2 {
+    Vec2::new(-signal.x, signal.y)
 }
 
 #[cfg(test)]

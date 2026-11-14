@@ -40,7 +40,9 @@ pub fn started(has_calibration: bool) -> Message {
     let gaze = if has_calibration { "" } else { "\n視線で動かすには Ctrl+Alt+C でキャリブレーションします。" };
     Message {
         title: "eye-tracking-mouse を開始しました",
-        text: format!("一時停止 Ctrl+Alt+P / 終了 Ctrl+Alt+Q。マウスを動かすと自動で待機します。{gaze}"),
+        text: format!(
+            "一時停止 Ctrl+Alt+P / 終了 Ctrl+Alt+Q。マウスを動かすと自動で待機します。\n頭で動かす速さは Ctrl+Alt+H で自分に合わせられます。{gaze}"
+        ),
         warning: false,
     }
 }
@@ -53,14 +55,30 @@ pub fn could_not_start(reason: &str) -> Message {
 /// The menu of the icon. What follows the tab is shown at the right edge, as the key to press instead.
 pub const MENU_PAUSE: &str = "一時停止\tCtrl+Alt+P";
 pub const MENU_RESUME: &str = "再開\tCtrl+Alt+P";
-pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
-pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
-pub const MENU_CHECK: &str = "追加補正テスト\tCtrl+Alt+T";
-pub const MENU_CHECK_STOP: &str = "追加補正テストを中止\tCtrl+Alt+T";
-/// The other entry's key while a run is going: it ends that run too.
-pub const MENU_CALIBRATE_STOP_SHORT: &str = "キャリブレーションを中止\tCtrl+Alt+T";
-pub const MENU_CHECK_STOP_SHORT: &str = "追加補正テストを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
+
+/// What a run does, as the menu says it.
+fn run_name(routine: Routine) -> &'static str {
+    match routine {
+        Routine::Calibration => "視線のキャリブレーション",
+        Routine::Check => "追加補正テスト",
+        Routine::Head => "頭のキャリブレーション",
+    }
+}
+
+/// The menu entry that starts `entry`, whose key is Ctrl+Alt+`key`. While a run is going,
+/// every such entry ends it, and says so: the page covers the screen.
+pub fn menu_run(entry: Routine, key: char, running: Option<Routine>) -> String {
+    match running {
+        None => format!("{}\tCtrl+Alt+{key}", run_name(entry)),
+        Some(running) => format!("{}を中止\tCtrl+Alt+{key}", run_name(running)),
+    }
+}
+
+/// The page's last line: how to get out of the run, whose key is Ctrl+Alt+`key`.
+pub fn how_to_cancel(key: char) -> String {
+    format!("Esc または Ctrl+Alt+{key} で中止")
+}
 /// What moves the cursor; the one in use is checked.
 pub const MENU_POINT_HEAD: &str = "頭だけで動かす";
 pub const MENU_POINT_EYE: &str = "視線で動かす（eye tracking）";
@@ -129,13 +147,21 @@ pub fn trouble(status: &Status) -> Option<Message> {
 const RETRY: &str = "Ctrl+Alt+C でやり直せます。";
 /// After a run that failed: which key starts which run again.
 const RUN_AGAIN: &str = "キャリブレーションは Ctrl+Alt+C、追加補正テストは Ctrl+Alt+T でやり直せます。";
+const HEAD_AGAIN: &str = "Ctrl+Alt+H でやり直せます。";
 
-/// Shown when a calibration run ended without a result.
-pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
+/// Shown when a calibration run of `routine` ended without a result.
+pub fn calibration_failed(routine: Routine, problem: &CalibrationProblem) -> Message {
+    let head = routine == Routine::Head;
     let text = match problem {
         CalibrationProblem::Routine(Failure::FaceLost) => "顔がカメラに映っていませんでした。".to_string(),
+        CalibrationProblem::Routine(Failure::TooSlow) if head => {
+            "顔を十分に測れませんでした。部屋の明るさとカメラの向きを確認してください。".to_string()
+        }
         CalibrationProblem::Routine(Failure::TooSlow) => {
             "目を開けた顔を十分に測れませんでした。部屋の明るさとカメラの向きを確認してください。".to_string()
+        }
+        CalibrationProblem::Routine(Failure::HeadNotMoved) if head => {
+            "点の方へ顔を向けて止めるのを待ちきれませんでした。無理なく回せるところまで点の方へ顔を向け、1秒ほど止めます。".to_string()
         }
         CalibrationProblem::Routine(Failure::HeadNotMoved) => {
             "最後のステップで頭の動きが足りませんでした。中央の点を見たまま、頭を上下左右にゆっくり回します。".to_string()
@@ -155,7 +181,8 @@ pub fn calibration_failed(problem: &CalibrationProblem) -> Message {
             };
         }
     };
-    Message { title: "キャリブレーションできませんでした", text: format!("{text}{RUN_AGAIN}"), warning: true }
+    let (title, again) = if head { ("頭のキャリブレーションができませんでした", HEAD_AGAIN) } else { ("キャリブレーションできませんでした", RUN_AGAIN) };
+    Message { title, text: format!("{text}{again}"), warning: true }
 }
 
 pub fn notice(notice: &Notice) -> Message {
@@ -167,7 +194,8 @@ pub fn notice(notice: &Notice) -> Message {
             ),
             warning: false,
         },
-        Notice::CalibrationDone { routine: Routine::Check, error_px, saved: Ok(()), .. } => Message {
+        // A check: a head run ends with `HeadCalibrated` instead.
+        Notice::CalibrationDone { error_px, saved: Ok(()), .. } => Message {
             title: "追加補正しました",
             text: format!(
                 "補正前のずれは平均 約{error_px:.0}ピクセルでした。この結果を補正に加えました。Ctrl+Alt+T でもう一度やると、さらに補正されます。"
@@ -179,7 +207,20 @@ pub fn notice(notice: &Notice) -> Message {
             text: format!("今回の結果は終了するまで使えますが、ファイルに保存できなかったので次回の起動時には残りません。（{reason}）"),
             warning: true,
         },
-        Notice::CalibrationFailed { problem, .. } => calibration_failed(problem),
+        Notice::HeadCalibrated { gain, saved: Ok(()), .. } => Message {
+            title: "頭のキャリブレーション完了",
+            text: format!(
+                "頭で動かすときの速さを合わせました（ゆっくり {:.0}、すばやく {:.0}、安定度 {}）。設定ファイルにも保存しました。",
+                gain.slow, gain.fast, gain.steadiness
+            ),
+            warning: false,
+        },
+        Notice::HeadCalibrated { saved: Err(reason), .. } => Message {
+            title: "完了（保存に失敗）",
+            text: format!("合わせた頭の速さは終了するまで使えますが、設定ファイルに保存できなかったので次回の起動時には元に戻ります。（{reason}）"),
+            warning: true,
+        },
+        Notice::CalibrationFailed { routine, problem, .. } => calibration_failed(*routine, problem),
         Notice::GazeUnavailable(problem) => {
             let cause = match problem {
                 GazeProblem::ScreenChanged => "キャリブレーションした画面が見つかりません。",
@@ -206,6 +247,11 @@ pub fn instruction(phase: Phase) -> &'static str {
         Phase::Places => "頭は動かさず、目だけで点を追ってください",
         Phase::Sweep => "中央の点を見つめたまま、頭を上下左右にゆっくり回してください",
         Phase::Check => "追加補正テスト：出てくる点を目で追ってください",
+        Phase::HeadRest => "正面を向いて、頭を動かさずにお待ちください",
+        Phase::HeadLeft => "左の点の方へ、無理なく回せるところまで顔を向けて止めてください",
+        Phase::HeadRight => "右の点の方へ、無理なく回せるところまで顔を向けて止めてください",
+        Phase::HeadUp => "上の点の方へ、無理なく上げられるところまで顔を向けて止めてください",
+        Phase::HeadDown => "下の点の方へ、無理なく下げられるところまで顔を向けて止めてください",
     }
 }
 
@@ -223,11 +269,11 @@ pub const CALIBRATION_TITLE: &str = "eye-tracking-mouse キャリブレーショ
 pub const PREVIEW_TITLE: &str = "eye-tracking-mouse プレビュー";
 pub const FACE_NOT_VISIBLE: &str = "顔がカメラに映っていません";
 pub const CALIBRATION_PREPARING: &str = "カメラを準備しています…";
-pub const CALIBRATION_HOW_TO_CANCEL: &str = "Esc または Ctrl+Alt+C で中止";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::head_pointer::HeadGain;
 
     fn fits(message: &Message) {
         let (title, text) = (message.title.encode_utf16().count(), message.text.encode_utf16().count());
@@ -271,11 +317,24 @@ mod tests {
             CalibrationProblem::DisplayChanged,
             CalibrationProblem::Paused,
         ];
-        let mut notices: Vec<Notice> =
-            problems.into_iter().map(|problem| Notice::CalibrationFailed { run: 1, problem }).collect();
+        // What can end a head calibration: it has no gaze model to make or check.
+        let head_problems = [
+            CalibrationProblem::Routine(Failure::FaceLost),
+            CalibrationProblem::Routine(Failure::TooSlow),
+            CalibrationProblem::Routine(Failure::HeadNotMoved),
+            CalibrationProblem::Camera(reason()),
+            CalibrationProblem::DisplayChanged,
+            CalibrationProblem::Paused,
+        ];
+        let failed = |routine| move |problem| Notice::CalibrationFailed { run: 1, routine, problem };
+        let mut notices: Vec<Notice> = problems.into_iter().map(failed(Routine::Calibration)).collect();
+        notices.extend(head_problems.into_iter().map(failed(Routine::Head)));
         notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 48.6, saved: Ok(()) });
         notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Check, error_px: 48.6, saved: Ok(()) });
         notices.push(Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 48.6, saved: Err(reason()) });
+        let gain = HeadGain { slow: 1273.0, fast: 19_999.0, steadiness: 1.5 };
+        notices.push(Notice::HeadCalibrated { run: 1, gain, saved: Ok(()) });
+        notices.push(Notice::HeadCalibrated { run: 1, gain, saved: Err(reason()) });
         notices.push(Notice::GazeUnavailable(GazeProblem::ScreenChanged));
         notices.push(Notice::GazeUnavailable(GazeProblem::CameraChanged));
         notices.push(Notice::CalibrationUnreadable(reason()));
@@ -304,5 +363,18 @@ mod tests {
         }
         let done = notice(&Notice::CalibrationDone { run: 1, routine: Routine::Calibration, error_px: 40.0, saved: Ok(()) });
         assert!(done.text.contains("約40ピクセル") && !done.warning);
+        let gain = HeadGain { slow: 1272.6, fast: 3818.4, steadiness: 3.0 };
+        let head = notice(&Notice::HeadCalibrated { run: 1, gain, saved: Ok(()) });
+        assert!(head.text.contains("ゆっくり 1273、すばやく 3818、安定度 3") && !head.warning, "{}", head.text);
+    }
+
+    #[test]
+    fn a_failed_head_calibration_says_so_and_names_its_own_key() {
+        let problem = CalibrationProblem::Routine(Failure::HeadNotMoved);
+        let head = calibration_failed(Routine::Head, &problem);
+        assert_eq!(head.title, "頭のキャリブレーションができませんでした");
+        assert!(head.text.ends_with(HEAD_AGAIN) && !head.text.contains("中央の点"), "{}", head.text);
+        let gaze = calibration_failed(Routine::Calibration, &problem);
+        assert!(gaze.text.contains("中央の点") && gaze.text.ends_with(RUN_AGAIN), "{}", gaze.text);
     }
 }

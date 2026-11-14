@@ -41,6 +41,11 @@ impl CalibrationRecord {
             Phase::Places => "places",
             Phase::Sweep => "sweep",
             Phase::Check => "check",
+            Phase::HeadRest => "head-rest",
+            Phase::HeadLeft => "head-left",
+            Phase::HeadRight => "head-right",
+            Phase::HeadUp => "head-up",
+            Phase::HeadDown => "head-down",
         };
         let _ = write!(self.text, "frame = {:.4} {stage} {} {} {:.3}", mesh.time, view.target.0, view.target.1, view.dwell);
         for point in &mesh.points {
