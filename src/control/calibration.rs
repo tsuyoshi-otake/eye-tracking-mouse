@@ -519,11 +519,15 @@ impl CalibrationSession {
                         self.stage_started = time;
                     }
                     Some(_) => {}
+                    // The eyes are still on their way from the place before: an answer taken
+                    // now would lie between the two and count against the model.
+                    None if time - self.stage_started < TRAVEL => {}
                     None => {
                         estimates.extend(basis.measure(mesh).map(|face| calibration.gaze.predict(&face)));
                         if estimates.len() >= CHECK_FRAMES {
-                            let share = 1.0 / estimates.len() as f32;
-                            let answer = estimates.iter().fold(Vec2::ZERO, |sum, &one| sum + one * share);
+                            // The middle one on each axis: a blink among the frames does not move it.
+                            let middle = |pick: fn(&Vec2) -> f32| median(estimates.iter().map(pick).collect());
+                            let answer = Vec2::new(middle(|one| one.x), middle(|one| one.y));
                             misses.push(answer.distance(check_point(area, index)));
                             shown = Some((answer, time));
                         }
@@ -750,8 +754,12 @@ mod tests {
         type Shown = ((i32, i32), (i32, i32), bool);
         let mut answers: Vec<Shown> = Vec::new();
         let mut scores = Vec::new();
+        let mut appeared = ((0, 0), 0);
         let (outcome, _) = run(&mut Person::new(1.0), &Behaviour::default(), |view| {
             assert!(view.phase == Phase::Check || (view.answer.is_none() && view.score.is_none()), "{view:?}");
+            // Nothing is measured in the second the eyes are given to get to a place (30 frames a second).
+            appeared = if view.target == appeared.0 { (appeared.0, appeared.1 + 1) } else { (view.target, 0) };
+            assert!(view.phase != Phase::Check || appeared.1 >= 30 || view.dwell == 0.0 || view.score.is_some(), "{view:?}");
             if let Some((answer, hit)) = view.answer {
                 assert!(view.score.is_none() && view.dwell == 1.0, "{view:?}");
                 if answers.last().map(|last| last.0) != Some(view.target) {
