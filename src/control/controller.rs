@@ -207,8 +207,15 @@ impl Controller {
         let Some(actual) = frame.cursor else {
             return Decision { sound: self.suspend(time, tuning), activity: Activity::Blocked, ..Decision::default() };
         };
-        if self.guard.observe(time, actual) == Verdict::Hold {
-            return Decision { sound: self.suspend(time, tuning), activity: Activity::Yielded, ..Decision::default() };
+        let probe = match self.guard.observe(time, actual) {
+            Verdict::Go { .. } => None,
+            Verdict::Hold => Some(None),
+            // Past the edge of the screens there is nothing to try; the guard tries the other side next.
+            Verdict::Probe((x, y)) => Some(clamp_to_union(frame.screens, f64::from(x), f64::from(y)).filter(|pixel| *pixel == (x, y))),
+        };
+        if let Some(move_to) = probe {
+            let sound = self.suspend(time, tuning);
+            return Decision { sound, activity: Activity::Yielded, move_to, ..Decision::default() };
         }
         // After a hold the position is gone, and the cursor is taken over from wherever it is now.
         let mut position = self.position.unwrap_or(Vec2::new(actual.0 as f32, actual.1 as f32));
@@ -508,7 +515,8 @@ mod tests {
         assert_eq!((desk.at(), desk.moves), (left_at, moves), "still yielding 1.3 s after the mouse stopped");
         desk.rest(10, 0.2, OPEN);
         assert_eq!(desk.activity, Activity::Tracking);
-        assert_eq!(desk.at(), left_at, "taking over does not move the cursor");
+        let taken_at = (left_at.0 + 1, left_at.1);
+        assert_eq!(desk.at(), taken_at, "taking over moves the cursor by the one pixel that asks whether it may");
         desk.turn(15, 0.2, 0.25, OPEN);
         assert!(desk.at().0 < left_at.0 && (desk.at().0 - left_at.0).abs() < 200, "{:?}", desk.at());
     }
@@ -524,7 +532,33 @@ mod tests {
         assert_eq!(desk.sounds, [Sound::Armed, Sound::Cancelled]);
         desk.rest(90, 0.0, OPEN);
         assert!(desk.clicks.is_empty());
-        assert_eq!(desk.at(), (900, 900));
+        assert_eq!(desk.at(), (901, 900), "the pixel tried on taking over, and nothing else");
+    }
+
+    #[test]
+    fn while_the_pointer_is_on_another_computer_nothing_but_single_pixels_is_sent() {
+        // A program sharing the mouse with another computer takes every move sent here
+        // and the cursor stays where it was parked.
+        let parked = (1200, 400);
+        let mut desk = Desk::new();
+        desk.rest(45, 0.0, OPEN);
+        let (mut sent, moves) = (Vec::new(), desk.moves);
+        for frame in 0..600 {
+            desk.cursor = Some(parked);
+            let yaw = 0.2 * (f32::from(frame as u16) / 20.0).sin();
+            desk.turn(1, yaw, yaw, OPEN);
+            if desk.at() != parked {
+                sent.push((desk.at().0 - parked.0, desk.at().1 - parked.1));
+            }
+        }
+        // 20 seconds of a turning head: one pixel every 1.5 s, to the right and to the left in turn.
+        assert!((4..=14).contains(&sent.len()) && sent.len() as u32 == desk.moves - moves, "{sent:?}");
+        assert!(sent.iter().all(|step| step.0.abs() == 1 && step.1 == 0), "{sent:?}");
+        assert!(sent.windows(2).all(|pair| pair[0].0 + pair[1].0 == 0), "{sent:?}");
+        assert!(desk.clicks.is_empty());
+        // Back on this computer the cursor obeys again, and the head has it after one more pixel.
+        desk.rest(60, 0.0, OPEN);
+        assert_eq!(desk.activity, Activity::Tracking);
     }
 
     #[test]
