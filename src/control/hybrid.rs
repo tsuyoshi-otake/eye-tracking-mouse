@@ -82,6 +82,9 @@ mod tests {
         cursor = correction.step(cursor, Vec2::new(1050.0, 400.0), Vec2::new(0.0, 25.0), REACH);
         cursor = correction.step(cursor, Vec2::new(820.0, 400.0), Vec2::ZERO, REACH);
         assert_eq!(cursor, Vec2::new(820.0, 425.0));
+        // 240 from the new place and 490 from the first: still the same correction.
+        cursor = correction.step(cursor, Vec2::new(1290.0, 400.0), Vec2::ZERO, REACH);
+        assert_eq!(cursor, Vec2::new(1290.0, 425.0));
     }
 
     #[test]
