@@ -67,6 +67,11 @@ pub struct Tuning {
     pub head_gain: HeadGain,
     /// How firmly the gaze-driven cursor is held in eye and hybrid mode, like `head_gain`'s steadiness.
     pub eye_steadiness: f32,
+    /// Cursor pixels per eye span of head movement in hybrid mode, at any speed. There the head
+    /// only corrects what the eyes carried, so it is slower than `head_gain` and does not speed
+    /// up with a quick movement: measured on a person, the quick gain threw the cursor by up to
+    /// 460 px in one frame.
+    pub hybrid_speed: f32,
     /// In head mode the gaze moves the cursor only when it rests at least this many pixels
     /// away from it. In hybrid mode the head's correction is dropped once the eyes have
     /// carried the cursor this far from where the correction began.
@@ -82,6 +87,7 @@ impl Default for Tuning {
             blink_click: true,
             head_gain: HeadGain { slow: 700.0, fast: 2200.0, steadiness: 2.0 },
             eye_steadiness: 1.5,
+            hybrid_speed: 450.0,
             jump_distance: 250.0,
             blink: BlinkSettings { hold: 0.4, limit: 1.5, closed_ratio: 0.5, open_ratio: 0.6 },
         }
@@ -269,7 +275,10 @@ impl Controller {
                     }
                 },
                 PointingMode::Hybrid => {
-                    makeup.nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                    // Correcting is fine work; without a calibration the head carries everything, as in head mode.
+                    let fine = HeadGain { slow: tuning.hybrid_speed, fast: tuning.hybrid_speed, ..tuning.head_gain };
+                    let gain = if frame.calibration.is_some() { fine } else { tuning.head_gain };
+                    makeup.nudge = self.head.step(time, &face.pose, &gain);
                     makeup.estimate = frame.calibration.map(|calibration| calibration.gaze.predict(face));
                     let seen = frame.calibration.zip(makeup.estimate).and_then(|(calibration, estimate)| landing(calibration.area, estimate));
                     position = match seen {
@@ -738,10 +747,31 @@ mod tests {
         assert!(apart(hybrid.0, eye.0) < 3.0, "with a still head the eyes alone decide: {:?} against {:?}", hybrid.0, eye.0);
         assert!(distance(hybrid.0, Vec2::new(1700.0, 420.0)) < 120.0, "{:?}", hybrid.0);
         // The turn of the head moved the cursor to the person's left, which the eyes alone would not have.
-        assert!(hybrid.1.0 < eye.1.0 - 40, "hybrid {:?} against eye {:?}", hybrid.1, eye.1);
+        assert!(hybrid.1.0 < eye.1.0 - 25, "hybrid {:?} against eye {:?}", hybrid.1, eye.1);
         assert!(apart(eye.1, eye.0) < 40.0, "the eyes alone stay: {:?} from {:?}", eye.1, eye.0);
         // Looking somewhere else leaves the correction behind.
         assert!(apart(hybrid.2, eye.2) < 3.0, "hybrid {:?} against eye {:?}", hybrid.2, eye.2);
+    }
+
+    #[test]
+    fn in_hybrid_mode_a_quick_turn_of_the_head_does_not_throw_the_cursor_as_it_does_in_head_mode() {
+        // The same quick turn while the eyes stay on one place: how far the cursor went from where it rested.
+        let thrown = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            desk.tuning.gaze_jump = false;
+            let target = Vec2::new(1700.0, 420.0);
+            sitter.look(&mut desk, 60, &Posture::default(), target, 1.0);
+            let rested = desk.at();
+            for step in 1..=5 {
+                sitter.look(&mut desk, 1, &Posture { yaw: 0.03 * step as f32, ..Posture::default() }, target, 1.0);
+            }
+            sitter.look(&mut desk, 20, &Posture { yaw: 0.15, ..Posture::default() }, target, 1.0);
+            distance(desk.at(), Vec2::new(rested.0 as f32, rested.1 as f32))
+        };
+        let (head, hybrid) = (thrown(PointingMode::Head), thrown(PointingMode::Hybrid));
+        assert!(hybrid > 20.0, "the head still corrects: {hybrid} px");
+        assert!(hybrid < head * 0.4, "hybrid {hybrid} px against head mode's {head} px");
     }
 
     #[test]

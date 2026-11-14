@@ -47,6 +47,7 @@ fn slot<'a>(settings: &'a mut Settings, name: &str) -> Option<Slot<'a>> {
         "head_speed_fast" => Slot::Number(&mut tuning.head_gain.fast, 50.0, 20000.0),
         "head_steadiness" => Slot::Number(&mut tuning.head_gain.steadiness, 0.5, 8.0),
         "eye_steadiness" => Slot::Number(&mut tuning.eye_steadiness, 0.5, 8.0),
+        "hybrid_head_speed" => Slot::Number(&mut tuning.hybrid_speed, 20.0, 5000.0),
         "jump_distance" => Slot::Number(&mut tuning.jump_distance, 120.0, 5000.0),
         "blink_hold" => Slot::Number(&mut tuning.blink.hold, 0.15, 3.0),
         "blink_limit" => Slot::Number(&mut tuning.blink.limit, 0.45, 10.0),
@@ -207,6 +208,10 @@ head_steadiness = {steadiness}
 # 大きいほど見つめている場所でカーソルが震えず、視線を移したときの追従は少し遅くなります。
 eye_steadiness = {eye_steadiness}
 
+# pointing = hybrid のときの、頭の動きに対するカーソルの速さ（20〜5000、大きいほど速い）
+# 微調整用なので head_speed_slow より小さくし、すばやく動かしても速くなりません。
+hybrid_head_speed = {hybrid_speed}
+
 # 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
 # これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
 # hybrid では、視線がこの距離だけカーソルを運ぶと頭での微調整が消えます。
@@ -237,6 +242,7 @@ pointing_record = {pointing_record}
         fast = tuning.head_gain.fast,
         steadiness = tuning.head_gain.steadiness,
         eye_steadiness = tuning.eye_steadiness,
+        hybrid_speed = tuning.hybrid_speed,
         jump = tuning.jump_distance,
         hold = tuning.blink.hold,
         limit = tuning.blink.limit,
@@ -256,7 +262,7 @@ mod tests {
         assert_eq!(settings, Settings::default());
         assert_eq!(warnings, Vec::<String>::new());
         // Every setting is offered in the template.
-        let names = ["camera", "calibration_record", "pointing_record", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "jump_distance"];
+        let names = ["camera", "calibration_record", "pointing_record", "pointing", "gaze_jump", "blink_click", "head_speed_slow", "head_speed_fast", "eye_steadiness", "hybrid_head_speed", "jump_distance"];
         for name in names.into_iter().chain(["blink_hold", "blink_limit", "blink_closed"]) {
             assert!(slot(&mut Settings::default(), name).is_some(), "{name}");
             assert!(template().contains(&format!("\n{name} = ")), "{name}");

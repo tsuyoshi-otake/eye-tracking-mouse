@@ -118,7 +118,7 @@ Esc または Ctrl+Alt+C でキャンセルできます。顔が5秒間映らな
 | `log.txt` | 前回起動以降にプログラムが行ったこと。テキストのみ。 |
 | `calibration-record-<時刻>.txt` | `settings.txt` で `calibration_record = on` にしたときだけ、キャリブレーションのたびに1つ作られます。各フレームで計測した顔の点の座標と、そのとき表示していた点の位置です(数値のみ、1回で数MB)。視線推定の精度を調べるためのもので、プログラム自身は読みません。不要になったら削除してください。 |
 
-`settings.txt` では、カメラ番号、ポインティングの方式(`pointing`、`head` か `eye` か `hybrid`)と `eye`・`hybrid` のときのカーソルの保ち方(`eye_steadiness`)、視線ジャンプとまばたきクリックのオン/オフ、頭の遅い・速い動きに対するカーソル速度(`head_speed_slow`、`head_speed_fast`)、静止カーソルの保ち方(`head_steadiness`、0.5〜8、既定2: 大きいほど穏やか)、最短ジャンプ距離(`jump_distance`)、まばたきクリックの各値(`blink_hold`、`blink_limit`、`blink_closed`)を設定できます。
+`settings.txt` では、カメラ番号、ポインティングの方式(`pointing`、`head` か `eye` か `hybrid`)と `eye`・`hybrid` のときのカーソルの保ち方(`eye_steadiness`)、`hybrid` のときの頭の動きに対するカーソルの速さ(`hybrid_head_speed`、20〜5000、既定450。微調整用で、すばやく動かしても速くなりません)、視線ジャンプとまばたきクリックのオン/オフ、頭の遅い・速い動きに対するカーソル速度(`head_speed_slow`、`head_speed_fast`)、静止カーソルの保ち方(`head_steadiness`、0.5〜8、既定2: 大きいほど穏やか)、最短ジャンプ距離(`jump_distance`)、まばたきクリックの各値(`blink_hold`、`blink_limit`、`blink_closed`)を設定できます。
 
 `settings.txt` は初回起動時に一度だけ書き出されます。以前の版が作ったファイルには `pointing` と `eye_steadiness` の行がありません。`pointing` はメニューで切り替えたときに末尾へ書き足されます。`eye_steadiness` を変えるときは自分で書き足してください(ない間は既定値で動きます)。
 
