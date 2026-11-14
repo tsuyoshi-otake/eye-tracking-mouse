@@ -9,3 +9,4 @@ pub mod fixation;
 pub mod gaze;
 pub mod guard;
 pub mod head_pointer;
+pub mod hybrid;

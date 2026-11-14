@@ -56,8 +56,10 @@ pub const MENU_RESUME: &str = "再開\tCtrl+Alt+P";
 pub const MENU_CALIBRATE: &str = "キャリブレーション\tCtrl+Alt+C";
 pub const MENU_CALIBRATE_STOP: &str = "キャリブレーションを中止\tCtrl+Alt+C";
 pub const MENU_PREVIEW: &str = "カメラのプレビュー";
-/// Checked while the eyes move the cursor; unchecked, the head does.
-pub const MENU_EYE_POINTING: &str = "視線でカーソルを動かす（eye tracking）";
+/// What moves the cursor; the one in use is checked.
+pub const MENU_POINT_HEAD: &str = "頭で動かす（遠くを見るとジャンプ）";
+pub const MENU_POINT_EYE: &str = "視線で動かす（eye tracking）";
+pub const MENU_POINT_HYBRID: &str = "視線で動かし、頭で微調整（ハイブリッド）";
 pub const MENU_SETTINGS: &str = "設定ファイルを開く（再起動で反映）";
 pub const MENU_QUIT: &str = "終了\tCtrl+Alt+Q";
 
@@ -84,7 +86,7 @@ pub fn settings_not_opened(path: &str, reason: &str) -> Message {
     Message { title: "設定ファイルを開けません", text: format!("{path}（{reason}）"), warning: true }
 }
 
-/// Shown when eye pointing is chosen and there is no calibration for it to work with.
+/// Shown when pointing with the eyes is chosen and there is no calibration for it to work with.
 pub fn eye_pointing_needs_calibration() -> Message {
     Message {
         title: "キャリブレーションが必要です",

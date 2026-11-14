@@ -109,9 +109,9 @@ impl Engine {
         self.calibration.as_ref()
     }
 
-    /// Whether anything reads the gaze estimate: jumps in head mode, or eye pointing.
+    /// Whether anything reads the gaze estimate: jumps in head mode, or the eyes carrying the cursor.
     pub fn uses_gaze(&self) -> bool {
-        self.tuning.gaze_jump || self.tuning.pointing == PointingMode::Eye
+        self.tuning.gaze_jump || self.tuning.pointing != PointingMode::Head
     }
 
     /// Changes what moves the cursor. Pointing starts afresh, as after any break.

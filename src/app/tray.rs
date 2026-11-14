@@ -61,15 +61,25 @@ pub enum Action {
     Pause = 1,
     Calibrate,
     Preview,
-    /// Switches between pointing with the head and with the eyes.
-    Pointing,
+    /// What moves the cursor: the head, the eyes, or the eyes with the head correcting.
+    PointHead,
+    PointEye,
+    PointHybrid,
     Settings,
     Quit,
 }
 
 impl Action {
-    const ALL: [Action; 6] =
-        [Action::Pause, Action::Calibrate, Action::Preview, Action::Pointing, Action::Settings, Action::Quit];
+    const ALL: [Action; 8] = [
+        Action::Pause,
+        Action::Calibrate,
+        Action::Preview,
+        Action::PointHead,
+        Action::PointEye,
+        Action::PointHybrid,
+        Action::Settings,
+        Action::Quit,
+    ];
 
     fn from_id(id: u32) -> Option<Action> {
         Action::ALL.into_iter().find(|&action| action as u32 == id)
@@ -279,7 +289,10 @@ impl App {
             item(Action::Calibrate, calibrate, false),
             item(Action::Preview, wording::MENU_PREVIEW, self.preview.is_some()),
             MenuItem::Separator,
-            item(Action::Pointing, wording::MENU_EYE_POINTING, self.pointing == PointingMode::Eye),
+            item(Action::PointHead, wording::MENU_POINT_HEAD, self.pointing == PointingMode::Head),
+            item(Action::PointEye, wording::MENU_POINT_EYE, self.pointing == PointingMode::Eye),
+            item(Action::PointHybrid, wording::MENU_POINT_HYBRID, self.pointing == PointingMode::Hybrid),
+            MenuItem::Separator,
             item(Action::Settings, wording::MENU_SETTINGS, false),
             MenuItem::Separator,
             item(Action::Quit, wording::MENU_QUIT, false),
@@ -297,7 +310,9 @@ impl App {
             Some(Action::Calibrate) => self.start_calibration(),
             Some(Action::Preview) if self.preview.is_some() => self.close_preview(),
             Some(Action::Preview) => self.open_preview(),
-            Some(Action::Pointing) => self.switch_pointing(),
+            Some(Action::PointHead) => self.choose_pointing(PointingMode::Head),
+            Some(Action::PointEye) => self.choose_pointing(PointingMode::Eye),
+            Some(Action::PointHybrid) => self.choose_pointing(PointingMode::Hybrid),
             Some(Action::Settings) => self.open_settings(),
             Some(Action::Quit) => {
                 self.log.line("quit by the person");
@@ -308,20 +323,20 @@ impl App {
         Flow::Continue
     }
 
-    /// Hands pointing from the head to the eyes or back: at once for the worker, and in the
-    /// settings file for the next start. A choice that could not be written down still holds
-    /// until the program ends, and the person is told that it will not last.
-    fn switch_pointing(&mut self) {
-        let pointing = match self.pointing {
-            PointingMode::Head => PointingMode::Eye,
-            PointingMode::Eye => PointingMode::Head,
-        };
+    /// Hands pointing to what the person chose: at once for the worker, and in the settings
+    /// file for the next start. A choice that could not be written down still holds until the
+    /// program ends, and the person is told that it will not last. Choosing what is already
+    /// in use changes nothing.
+    fn choose_pointing(&mut self, pointing: PointingMode) {
+        if self.pointing == pointing {
+            return;
+        }
         self.pointing = pointing;
         self.pipeline.set_pointing(pointing);
         self.log.line(&format!("pointing set to {} by the person", settings::pointing_word(pointing)));
         match self.storage.save_pointing(pointing) {
             Err(error) => self.show(&wording::pointing_not_saved(error.message())),
-            Ok(()) if pointing == PointingMode::Eye && !self.storage.has_calibration() => {
+            Ok(()) if pointing != PointingMode::Head && !self.storage.has_calibration() => {
                 self.show(&wording::eye_pointing_needs_calibration());
             }
             Ok(()) => {}

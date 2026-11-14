@@ -85,7 +85,8 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
             Some(Slot::Pointing(target)) => match value.to_ascii_lowercase().as_str() {
                 "head" => *target = PointingMode::Head,
                 "eye" => *target = PointingMode::Eye,
-                _ => warnings.push(format!("{place}: {name} は head か eye で指定してください")),
+                "hybrid" => *target = PointingMode::Hybrid,
+                _ => warnings.push(format!("{place}: {name} は head か eye か hybrid で指定してください")),
             },
             Some(Slot::Number(target, low, high)) => match value.parse::<f32>() {
                 Ok(number) if number.is_finite() => {
@@ -127,6 +128,7 @@ pub fn pointing_word(mode: PointingMode) -> &'static str {
     match mode {
         PointingMode::Head => "head",
         PointingMode::Eye => "eye",
+        PointingMode::Hybrid => "hybrid",
     }
 }
 
@@ -175,14 +177,16 @@ pub fn template() -> String {
 # 使うカメラの番号（eye-tracking-mouse --list-cameras で確認できます）
 camera = {camera}
 
-# カーソルを動かすもの: head / eye
+# カーソルを動かすもの: head / eye / hybrid
 # head: 頭の動きで動かし、遠くを見ると視線ジャンプで飛ぶ（既定）
 # eye: 視線がそのままカーソルの位置になる、連続追従の eye tracking。
-#      キャリブレーション済みの画面でのみ動き、未実施なら head と同じ動作です。
+# hybrid: 視線がカーソルを運び、頭の小さな動きでそこから微調整する。
+#         別の場所（jump_distance 以上離れた所）を見ると微調整は消えます。
+# eye と hybrid はキャリブレーション済みの画面でのみ動き、未実施なら頭の動きだけで動かします。
 pointing = {pointing}
 
 # 視線ジャンプ（見た場所へカーソルが飛ぶ）: on / off
-# pointing = eye では使いません（視線が常にカーソルの位置になるため）。
+# pointing = head のときだけ使います（eye と hybrid では視線が常にカーソルを運ぶため）。
 gaze_jump = {gaze_jump}
 
 # 長いまばたきで左クリック: on / off
@@ -196,12 +200,13 @@ head_speed_fast = {fast}
 # カーソルの安定度（0.5〜8、大きいほど止まっているときに震えず、動き出しは少し遅くなる）
 head_steadiness = {steadiness}
 
-# pointing = eye のときの視線カーソルの安定度（0.5〜8）
+# pointing = eye / hybrid のときの視線カーソルの安定度（0.5〜8）
 # 大きいほど見つめている場所でカーソルが震えず、視線を移したときの追従は少し遅くなります。
 eye_steadiness = {eye_steadiness}
 
 # 視線ジャンプが起きる最小の距離（ピクセル、120〜5000）
 # これより近い場所を見てもカーソルは飛ばず、頭の動きだけで動きます。
+# hybrid では、視線がこの距離だけカーソルを運ぶと頭での微調整が消えます。
 jump_distance = {jump}
 
 # クリックになるまで目を閉じておく時間（秒、0.15〜3.0）
@@ -264,7 +269,9 @@ mod tests {
     }
 
     #[test]
-    fn the_pointing_mode_accepts_head_and_eye_and_rejects_anything_else() {
+    fn the_pointing_mode_accepts_its_three_words_and_rejects_anything_else() {
+        let (settings, warnings) = parse("pointing = Hybrid\n");
+        assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Hybrid, 0));
         let (settings, warnings) = parse("pointing = eye\neye_steadiness = 3\n");
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(settings.tuning.pointing, PointingMode::Eye);
@@ -273,7 +280,7 @@ mod tests {
         assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Head, 0));
         let (settings, warnings) = parse("pointing = gaze\n");
         assert_eq!((settings.tuning.pointing, warnings.len()), (PointingMode::Head, 1));
-        assert!(warnings[0].contains("head か eye"), "{}", warnings[0]);
+        assert!(warnings[0].contains("head か eye か hybrid"), "{}", warnings[0]);
     }
 
     #[test]
@@ -301,7 +308,7 @@ mod tests {
         assert_eq!(with_pointing(marked, PointingMode::Eye), format!("{marked}pointing = eye\n"));
         let texts = [template.as_str(), "camera = 1", "pointing = eye\npointing = head\ncamera = 3\n", "pointing = nonsense\n"];
         for text in texts.into_iter().chain([marked, "  \u{feff}pointing = head\n", "\u{feff}\u{feff}pointing = head"]) {
-            for mode in [PointingMode::Head, PointingMode::Eye] {
+            for mode in [PointingMode::Head, PointingMode::Eye, PointingMode::Hybrid] {
                 let (before, _) = parse(text);
                 let (after, warnings) = parse(&with_pointing(text, mode));
                 assert_eq!(after.tuning.pointing, mode, "{text:?}");

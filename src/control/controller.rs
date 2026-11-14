@@ -8,6 +8,10 @@
 //! 3. The gaze: a rest on a place far from the cursor jumps the cursor there.
 //! 4. The head: everything else is small head movement nudging the cursor.
 //!
+//! That is the head mode. In eye mode 3 and 4 give way to the gaze estimate
+//! being the cursor's place in every frame, and in hybrid mode the head's
+//! movement is added to that as a correction.
+//!
 //! The controller never touches the system; it returns what should be done.
 
 use std::collections::VecDeque;
@@ -21,6 +25,7 @@ use super::eye_pointer::EyePointer;
 use super::fixation::FixationDetector;
 use super::guard::{ManualGuard, Verdict};
 use super::head_pointer::{HeadGain, HeadPointer};
+use super::hybrid::Correction;
 
 /// Seconds of cursor history kept, for going back to before the lids dropped.
 const REWIND: f64 = 0.15;
@@ -42,12 +47,17 @@ pub enum PointingMode {
     /// The eyes move the cursor directly: every frame's gaze estimate is where
     /// it sits. Needs a calibration; without one the head carries pointing.
     Eye,
+    /// The eyes carry the cursor as in `Eye`, and small head movements move it
+    /// away from where the eyes put it, to make up for what the estimate is
+    /// off by. Looking somewhere else drops that correction. Needs a
+    /// calibration; without one the head carries pointing.
+    Hybrid,
 }
 
 /// What the person can adjust.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
-    /// Head or eyes.
+    /// Head, eyes, or both.
     pub pointing: PointingMode,
     /// Jump the cursor to where the person looks. Only in head mode: in eye
     /// mode every frame's estimate is already where the cursor is.
@@ -55,9 +65,11 @@ pub struct Tuning {
     /// Click with a long blink.
     pub blink_click: bool,
     pub head_gain: HeadGain,
-    /// How firmly the gaze-driven cursor is held in eye mode, like `head_gain`'s steadiness.
+    /// How firmly the gaze-driven cursor is held in eye and hybrid mode, like `head_gain`'s steadiness.
     pub eye_steadiness: f32,
-    /// The gaze moves the cursor only when it rests at least this many pixels away from it.
+    /// In head mode the gaze moves the cursor only when it rests at least this many pixels
+    /// away from it. In hybrid mode the head's correction is dropped once the eyes have
+    /// carried the cursor this far from where the correction began.
     pub jump_distance: f32,
     pub blink: BlinkSettings,
 }
@@ -126,6 +138,7 @@ pub struct Controller {
     guard: ManualGuard,
     head: HeadPointer,
     eye: EyePointer,
+    correction: Correction,
     blink: BlinkClicker,
     fixation: FixationDetector,
     /// Where the cursor should be, finer than a pixel. `None` until it is taken over from the system.
@@ -162,6 +175,7 @@ impl Controller {
         let sound = sound_for(self.blink.step(time, None, &tuning.blink)).filter(|_| tuning.blink_click);
         self.head.reset();
         self.eye.reset();
+        self.correction.reset();
         self.fixation.reset();
         self.trail.clear();
         self.anchor = None;
@@ -231,6 +245,18 @@ impl Controller {
                     // No calibration yet: the head carries pointing until there is one.
                     None => position = position + self.head.step(time, &face.pose, &tuning.head_gain),
                 },
+                PointingMode::Hybrid => {
+                    let nudge = self.head.step(time, &face.pose, &tuning.head_gain);
+                    let seen = frame.calibration.and_then(|calibration| landing(calibration.area, calibration.gaze.predict(face)));
+                    position = match seen {
+                        Some(place) => {
+                            let eyes = self.eye.step(time, place, tuning.eye_steadiness);
+                            self.correction.step(position, eyes, nudge, tuning.jump_distance)
+                        }
+                        // No calibration, or looking past the screen: the eyes hold their part and the head goes on.
+                        None => position + nudge,
+                    };
+                }
             }
             self.trail.push_back((time, position));
             while self.trail.front().is_some_and(|&(then, _)| time - then > REWIND) {
@@ -661,6 +687,51 @@ mod tests {
         assert!(distance(rested, Vec2::new(1280.0, 540.0)) < 3.0, "a still head moves next to nothing: {rested:?}");
         assert!(turned.0 < 1280 - 50, "the head still points while there is no calibration: {turned:?}");
         assert_eq!((rested, turned), run(PointingMode::Head), "pixel for pixel what head mode does");
+    }
+
+    #[test]
+    fn in_hybrid_mode_the_eyes_carry_the_cursor_and_the_head_corrects_it_until_the_eyes_move_on() {
+        // The same person twice, measured with the same noise: the eyes alone, and both.
+        let run = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            let target = Vec2::new(1700.0, 420.0);
+            sitter.look(&mut desk, 60, &Posture::default(), target, 1.0);
+            let carried = desk.at();
+            // The eyes stay on the place while the head turns a little and rests.
+            for step in 1..=20 {
+                sitter.look(&mut desk, 1, &Posture { yaw: 0.004 * step as f32, ..Posture::default() }, target, 1.0);
+            }
+            let turned = Posture { yaw: 0.08, ..Posture::default() };
+            sitter.look(&mut desk, 30, &turned, target, 1.0);
+            let corrected = desk.at();
+            sitter.look(&mut desk, 60, &turned, Vec2::new(600.0, 800.0), 1.0);
+            (carried, corrected, desk.at())
+        };
+        let (eye, hybrid) = (run(PointingMode::Eye), run(PointingMode::Hybrid));
+        let apart = |one: (i32, i32), other: (i32, i32)| distance(one, Vec2::new(other.0 as f32, other.1 as f32));
+        assert!(apart(hybrid.0, eye.0) < 3.0, "with a still head the eyes alone decide: {:?} against {:?}", hybrid.0, eye.0);
+        assert!(distance(hybrid.0, Vec2::new(1700.0, 420.0)) < 120.0, "{:?}", hybrid.0);
+        // The turn of the head moved the cursor to the person's left, which the eyes alone would not have.
+        assert!(hybrid.1.0 < eye.1.0 - 40, "hybrid {:?} against eye {:?}", hybrid.1, eye.1);
+        assert!(apart(eye.1, eye.0) < 40.0, "the eyes alone stay: {:?} from {:?}", eye.1, eye.0);
+        // Looking somewhere else leaves the correction behind.
+        assert!(apart(hybrid.2, eye.2) < 3.0, "hybrid {:?} against eye {:?}", hybrid.2, eye.2);
+    }
+
+    #[test]
+    fn hybrid_mode_without_a_calibration_points_with_the_head() {
+        let run = |pointing: PointingMode| {
+            let (mut sitter, mut desk) = (Sitter::new(), Desk::new());
+            desk.tuning.pointing = pointing;
+            look_uncalibrated(&mut sitter, &mut desk, 30, &Posture::default(), Vec2::new(1280.0, 540.0));
+            for step in 1..=20 {
+                look_uncalibrated(&mut sitter, &mut desk, 1, &Posture { yaw: 0.01 * step as f32, ..Posture::default() }, Vec2::new(1280.0, 540.0));
+            }
+            desk.at()
+        };
+        assert!(run(PointingMode::Hybrid).0 < 1280 - 50);
+        assert_eq!(run(PointingMode::Hybrid), run(PointingMode::Head), "pixel for pixel what head mode does");
     }
 
     #[test]

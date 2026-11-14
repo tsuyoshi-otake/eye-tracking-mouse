@@ -146,7 +146,8 @@ fn the_resident_program_starts_obeys_and_quits_without_a_camera() {
     assert!(first.contains("
 pointing = head
 "), "the template starts with the head");
-    press(Action::Pointing);
+    press(Action::PointHead);
+    press(Action::PointEye);
     wait_until("eye pointing in the log and the file", 5, || {
         let text = log(&folder);
         text.contains("pointing set to eye by the person")
@@ -155,7 +156,13 @@ pointing = head
 pointing = eye
 ")
     });
-    press(Action::Pointing);
+    press(Action::PointHybrid);
+    wait_until("hybrid pointing in the log and the file", 5, || {
+        log(&folder).contains("pointing set to hybrid by the person") && settings().contains("
+pointing = hybrid
+")
+    });
+    press(Action::PointHead);
     wait_until("head pointing in the log and the file", 5, || {
         log(&folder).contains("pointing set to head by the person") && settings().contains("
 pointing = head
